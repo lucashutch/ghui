@@ -4,12 +4,11 @@ import { useKeyboard, useTerminalDimensions } from "@opentui/react"
 import * as Atom from "effect/unstable/reactivity/Atom"
 import { Fragment, useEffect, useMemo, useRef } from "react"
 import { config } from "./config.js"
-import type { PullRequestItem, PullRequestLabel } from "./domain.js"
-import { daysOpen, formatShortDate, formatTimestamp } from "./date.js"
-import { listOpenPullRequests as loadOpenPullRequests, toggleBetaLabel, toggleDraftStatus } from "./services/GitHubService.js"
+import type { CheckItem, PullRequestItem, PullRequestLabel } from "./domain.js"
+import { daysOpen, formatRelativeDate, formatShortDate, formatTimestamp } from "./date.js"
+import { addPullRequestLabel, getAuthenticatedUser, listOpenPullRequests as loadOpenPullRequests, listRepoLabels, removePullRequestLabel, toggleDraftStatus } from "./services/GitHubService.js"
 
 const toggleDraft = (repository: string, number: number, isDraft: boolean) => toggleDraftStatus(repository, number, isDraft)
-const toggleBeta = (repository: string, number: number, hasBeta: boolean) => toggleBetaLabel(repository, number, hasBeta)
 
 const colors = {
 	text: "#ede7da",
@@ -75,6 +74,29 @@ const filterDraftAtom = Atom.make("").pipe(Atom.keepAlive)
 const filterModeAtom = Atom.make(false).pipe(Atom.keepAlive)
 const pendingGAtom = Atom.make(false).pipe(Atom.keepAlive)
 const detailFullViewAtom = Atom.make(false).pipe(Atom.keepAlive)
+const detailScrollOffsetAtom = Atom.make(0).pipe(Atom.keepAlive)
+
+const GROUP_ICONS = ["▸", "◆", "●", "▪", "›", "◈", "▹", "◉", "⬥", "⏵", "⊡", "⬩"] as const
+const groupIconIndexAtom = Atom.make(0).pipe(Atom.keepAlive)
+
+interface LabelModalState {
+	readonly open: boolean
+	readonly query: string
+	readonly selectedIndex: number
+	readonly availableLabels: readonly PullRequestLabel[]
+	readonly loading: boolean
+}
+
+const initialLabelModalState: LabelModalState = {
+	open: false,
+	query: "",
+	selectedIndex: 0,
+	availableLabels: [],
+	loading: false,
+}
+
+const labelModalAtom = Atom.make(initialLabelModalState).pipe(Atom.keepAlive)
+const usernameAtom = Atom.make<string | null>(null).pipe(Atom.keepAlive)
 
 const shortRepoName = (repository: string) => repository.split("/")[1] ?? repository
 
@@ -93,9 +115,25 @@ const reviewLabel = (pullRequest: PullRequestItem) => {
 const checkLabel = (pullRequest: PullRequestItem) => pullRequest.checkSummary
 
 const statusColor = (status: PullRequestItem["reviewStatus"] | PullRequestItem["checkStatus"]) => colors.status[status]
-const SEPARATOR = " • "
 const DETAIL_BODY_LINES = 6
-const DETAIL_DIVIDER_ROW = 7
+
+const wrapText = (text: string, width: number): string[] => {
+	if (text.length === 0 || width <= 0) return [""]
+	const words = text.split(/\s+/)
+	const lines: string[] = []
+	let current = ""
+	for (const word of words) {
+		const next = current.length > 0 ? `${current} ${word}` : word
+		if (next.length > width && current.length > 0) {
+			lines.push(current)
+			current = word
+		} else {
+			current = next
+		}
+	}
+	if (current.length > 0) lines.push(current)
+	return lines.length > 0 ? lines : [""]
+}
 
 const reviewIcon = (pullRequest: PullRequestItem) => {
 	if (pullRequest.reviewStatus === "draft") return "◌"
@@ -105,14 +143,19 @@ const reviewIcon = (pullRequest: PullRequestItem) => {
 	return "·"
 }
 
-const getRowLayout = (contentWidth: number) => {
+const getRowLayout = (contentWidth: number, numberWidth = 6) => {
 	const reviewWidth = 1
 	const checkWidth = 6
 	const ageWidth = 4
 	const leftWidth = Math.max(24, contentWidth - reviewWidth - checkWidth - ageWidth - 2) // -2 for spaces between columns
-	const numberWidth = 6
 	const titleWidth = Math.max(8, leftWidth - numberWidth - 2)
 	return { reviewWidth, checkWidth, ageWidth, numberWidth, titleWidth }
+}
+
+const groupNumberWidth = (pullRequests: readonly PullRequestItem[]) => {
+	if (pullRequests.length === 0) return 4
+	const maxLen = Math.max(...pullRequests.map((pr) => String(pr.number).length))
+	return maxLen + 1 // +1 for the # prefix
 }
 
 const fitCell = (text: string, width: number, align: "left" | "right" = "left") => {
@@ -128,13 +171,16 @@ const Divider = ({ width, junctionAt, junctionChar }: { width: number; junctionA
 	return <PlainLine text={`${"─".repeat(junctionAt)}${junctionChar}${"─".repeat(Math.max(0, width - junctionAt - 1))}`} fg={colors.separator} />
 }
 
-const SeparatorColumn = ({ height, junctionRow }: { height: number; junctionRow?: number }) => (
-	<box width={1} height={height} flexDirection="column">
-		{Array.from({ length: height }, (_, index) => (
-			<PlainLine key={index} text={junctionRow === index ? "├" : "│"} fg={colors.separator} />
-		))}
-	</box>
-)
+const SeparatorColumn = ({ height, junctionRows }: { height: number; junctionRows?: readonly number[] }) => {
+	const junctions = new Set(junctionRows)
+	return (
+		<box width={1} height={height} flexDirection="column">
+			{Array.from({ length: height }, (_, index) => (
+				<PlainLine key={index} text={junctions.has(index) ? "├" : "│"} fg={colors.separator} />
+			))}
+		</box>
+	)
+}
 
 const deleteLastWord = (value: string) => value.replace(/\s*\S+\s*$/, "")
 
@@ -187,6 +233,8 @@ const wrapPreviewSegments = (segments: PreviewLine["segments"], width: number, i
 	return lines
 }
 
+// @ts-ignore kept for potential future use
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 const hasLabel = (pullRequest: PullRequestItem, label: string) => pullRequest.labels.some((current) => current.name.toLowerCase() === label.toLowerCase())
 
 const fallbackLabelColor = (name: string) => {
@@ -351,10 +399,8 @@ const SectionTitle = ({ title }: { title: string }) => (
 
 const FooterHints = ({ showFilterClear, detailFullView }: { showFilterClear: boolean; detailFullView: boolean }) => (
 	<TextLine>
-		<span fg={colors.count}>up/down</span>
+		<span fg={colors.count}>↑↓</span>
 		<span fg={colors.muted}> move  </span>
-		<span fg={colors.count}>gg/G</span>
-		<span fg={colors.muted}> jump  </span>
 		<span fg={colors.count}>/</span>
 		<span fg={colors.muted}> filter  </span>
 		{showFilterClear ? (
@@ -365,21 +411,21 @@ const FooterHints = ({ showFilterClear, detailFullView }: { showFilterClear: boo
 		) : null}
 		{detailFullView ? (
 			<>
-				<span fg={colors.count}>esc/enter</span>
-				<span fg={colors.muted}> list  </span>
+				<span fg={colors.count}>esc</span>
+				<span fg={colors.muted}> back  </span>
 			</>
 		) : (
 			<>
 				<span fg={colors.count}>enter</span>
-				<span fg={colors.muted}> full  </span>
+				<span fg={colors.muted}> expand  </span>
 			</>
 		)}
 		<span fg={colors.count}>r</span>
 		<span fg={colors.muted}> ref  </span>
 		<span fg={colors.count}>d</span>
 		<span fg={colors.muted}> draft  </span>
-		<span fg={colors.count}>b</span>
-		<span fg={colors.muted}> beta  </span>
+		<span fg={colors.count}>l</span>
+		<span fg={colors.muted}> labels  </span>
 		<span fg={colors.count}>o</span>
 		<span fg={colors.muted}> open  </span>
 		<span fg={colors.count}>y</span>
@@ -389,11 +435,10 @@ const FooterHints = ({ showFilterClear, detailFullView }: { showFilterClear: boo
 	</TextLine>
 )
 
-const GroupTitle = ({ label, color }: { label: string; color: string }) => (
+const GroupTitle = ({ label, color, icon }: { label: string; color: string; icon: string }) => (
 	<TextLine>
-		<span fg={color} attributes={TextAttributes.BOLD}>
-			◆ {label}
-		</span>
+		<span fg={color}>{icon} </span>
+		<span fg={color} attributes={TextAttributes.BOLD}>{label}</span>
 	</TextLine>
 )
 
@@ -401,16 +446,18 @@ const PullRequestRow = ({
 	pullRequest,
 	selected,
 	contentWidth,
+	numWidth,
 	onSelect,
 }: {
 	pullRequest: PullRequestItem
 	selected: boolean
 	contentWidth: number
+	numWidth: number
 	onSelect: () => void
 }) => {
 	const checkText = checkLabel(pullRequest)?.replace(/^checks\s+/, "") ?? ""
 	const ageText = `${daysOpen(pullRequest.createdAt)}d`
-	const { reviewWidth, checkWidth, ageWidth, numberWidth, titleWidth } = getRowLayout(contentWidth)
+	const { reviewWidth, checkWidth, ageWidth, numberWidth, titleWidth } = getRowLayout(contentWidth, numWidth)
 
 	return (
 		<box height={1} onMouseDown={onSelect}>
@@ -461,6 +508,7 @@ const PullRequestList = ({
 	filterText,
 	showFilterBar,
 	isFilterEditing,
+	groupIcon,
 	onSelectPullRequest,
 }: {
 	groups: PullRequestGroups
@@ -471,9 +519,11 @@ const PullRequestList = ({
 	filterText: string
 	showFilterBar: boolean
 	isFilterEditing: boolean
+	groupIcon: string
 	onSelectPullRequest: (url: string) => void
 }) => {
 	const itemCount = groups.reduce((count, [, pullRequests]) => count + pullRequests.length, 0)
+	const emptyText = filterText.length > 0 ? "- No matching pull requests." : "- No open pull requests."
 
 	return (
 		<box flexDirection="column">
@@ -487,22 +537,207 @@ const PullRequestList = ({
 			) : null}
 			{status === "loading" && itemCount === 0 ? <PlainLine text="- Loading pull requests..." fg={colors.muted} /> : null}
 			{status === "error" ? <PlainLine text={`- ${error ?? "Could not load pull requests."}`} fg={colors.error} /> : null}
-			{status === "ready" && itemCount === 0 ? <PlainLine text={filterText.length > 0 ? "- No matching pull requests." : "- No open pull requests."} fg={colors.muted} /> : null}
-			{groups.map(([repo, pullRequests]) => (
-				<Fragment key={repo}>
-					<box flexDirection="column">
-						<GroupTitle label={repo} color={repoColor(repo)} />
-						{pullRequests.map((pullRequest) => (
-							<PullRequestRow
-								key={pullRequest.url}
-								pullRequest={pullRequest}
-								selected={pullRequest.url === selectedUrl}
-								contentWidth={contentWidth}
-								onSelect={() => onSelectPullRequest(pullRequest.url)}
-							/>
-						))}
+			{status === "ready" && itemCount === 0 ? <PlainLine text={emptyText} fg={colors.muted} /> : null}
+			{groups.map(([repo, pullRequests]) => {
+				const numWidth = groupNumberWidth(pullRequests)
+				return (
+					<Fragment key={repo}>
+						<box flexDirection="column">
+							<GroupTitle label={repo} color={repoColor(repo)} icon={groupIcon} />
+							{pullRequests.map((pullRequest) => (
+								<PullRequestRow
+									key={pullRequest.url}
+									pullRequest={pullRequest}
+									selected={pullRequest.url === selectedUrl}
+									contentWidth={contentWidth}
+									numWidth={numWidth}
+									onSelect={() => onSelectPullRequest(pullRequest.url)}
+								/>
+							))}
+						</box>
+					</Fragment>
+				)
+			})}
+		</box>
+	)
+}
+
+const deduplicateChecks = (checks: readonly CheckItem[]): CheckItem[] => {
+	const seen = new Map<string, CheckItem>()
+	for (const check of checks) {
+		const existing = seen.get(check.name)
+		if (!existing || (check.status === "completed" && existing.status !== "completed")) {
+			seen.set(check.name, check)
+		}
+	}
+	return [...seen.values()]
+}
+
+const checkIcon = (check: CheckItem) => {
+	if (check.status === "completed") {
+		if (check.conclusion === "success" || check.conclusion === "neutral" || check.conclusion === "skipped") return "✓"
+		if (check.conclusion === "failure") return "✗"
+		return "·"
+	}
+	if (check.status === "in_progress") return "●"
+	return "○"
+}
+
+const checkColor = (check: CheckItem) => {
+	if (check.status === "completed") {
+		if (check.conclusion === "success" || check.conclusion === "neutral" || check.conclusion === "skipped") return colors.status.passing
+		if (check.conclusion === "failure") return colors.status.failing
+		return colors.muted
+	}
+	if (check.status === "in_progress") return colors.status.pending
+	return colors.muted
+}
+
+const checksRowCount = (checks: readonly CheckItem[]) => {
+	const unique = deduplicateChecks(checks)
+	return Math.ceil(unique.length / 2)
+}
+
+const ChecksSection = ({ checks, contentWidth }: { checks: readonly CheckItem[]; contentWidth: number }) => {
+	const unique = deduplicateChecks(checks)
+	if (unique.length === 0) return null
+
+	const colWidth = Math.floor((contentWidth - 1) / 2) // -1 for gap between columns
+	const nameCol = Math.max(4, colWidth - 2) // -2 for icon + space
+	const rows = Math.ceil(unique.length / 2)
+
+	return (
+		<box flexDirection="column">
+			<TextLine>
+				<span fg={colors.count} attributes={TextAttributes.BOLD}>Checks</span>
+			</TextLine>
+			{Array.from({ length: rows }, (_, rowIndex) => {
+				const left = unique[rowIndex * 2]
+				const right = unique[rowIndex * 2 + 1]
+				return (
+					<TextLine key={rowIndex}>
+						{left ? (
+							<>
+								<span fg={checkColor(left)}>{checkIcon(left)} </span>
+								<span fg={colors.text}>{fitCell(left.name, nameCol)}</span>
+							</>
+						) : null}
+						{right ? (
+							<>
+								<span fg={colors.muted}> </span>
+								<span fg={checkColor(right)}>{checkIcon(right)} </span>
+								<span fg={colors.text}>{right.name}</span>
+							</>
+						) : null}
+					</TextLine>
+				)
+			})}
+		</box>
+	)
+}
+
+const DetailHeader = ({
+	pullRequest,
+	contentWidth,
+	paneWidth,
+	showChecks = false,
+}: {
+	pullRequest: PullRequestItem
+	contentWidth: number
+	paneWidth: number
+	showChecks?: boolean
+}) => {
+	const labels = pullRequest.labels
+	const wrappedTitle = wrapText(pullRequest.title, Math.max(1, paneWidth - 2))
+	const unique = deduplicateChecks(pullRequest.checks)
+	const checkRows = checksRowCount(unique)
+
+	return (
+		<>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+			{(() => {
+				const opened = formatRelativeDate(pullRequest.createdAt)
+				const repo = shortRepoName(pullRequest.repository)
+				const number = String(pullRequest.number)
+				const review = reviewLabel(pullRequest)
+				const checks = pullRequest.checkSummary?.replace(/^checks\s+/, "")
+				const statusParts = [review, checks].filter((part): part is string => Boolean(part))
+				const rightSide = statusParts.length > 0 ? `${statusParts.join(" ")}  ${opened}` : opened
+				const leftWidth = 1 + number.length + 1 + repo.length
+				const gap = Math.max(2, contentWidth - leftWidth - rightSide.length)
+
+				return (
+					<TextLine>
+						<span fg={colors.count}>#{number}</span>
+						<span fg={colors.muted}> {repo}</span>
+						<span fg={colors.muted}>{" ".repeat(gap)}</span>
+						{review ? <span fg={statusColor(pullRequest.reviewStatus)}>{review}</span> : null}
+						{review && checks ? <span fg={colors.muted}> </span> : null}
+						{checks ? <span fg={statusColor(pullRequest.checkStatus)}>{checks}</span> : null}
+						{statusParts.length > 0 ? <span fg={colors.muted}>  </span> : null}
+						<span fg={colors.muted}>{opened}</span>
+					</TextLine>
+				)
+			})()}
+			</box>
+			<box height={wrappedTitle.length} flexDirection="column" paddingLeft={1} paddingRight={1}>
+				{wrappedTitle.map((line, index) => (
+					<PlainLine key={index} text={line} bold />
+				))}
+			</box>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					{labels.length > 0 ? labels.map((label, index) => (
+						<Fragment key={label.name}>
+							{index > 0 ? <span fg={colors.muted}> </span> : null}
+							<span bg={labelColor(label)} fg={labelTextColor(labelColor(label))}> {label.name} </span>
+						</Fragment>
+					)) : <span fg={colors.muted}>no labels</span>}
+				</TextLine>
+			</box>
+			<box height={1}><Divider width={paneWidth} /></box>
+			{showChecks && unique.length > 0 ? (
+				<>
+					<box height={checkRows + 1} paddingLeft={1} paddingRight={1}>
+						<ChecksSection checks={pullRequest.checks} contentWidth={contentWidth} />
 					</box>
-				</Fragment>
+					<box height={1}><Divider width={paneWidth} /></box>
+				</>
+			) : null}
+		</>
+	)
+}
+
+const DetailBody = ({
+	pullRequest,
+	contentWidth,
+	bodyLines = DETAIL_BODY_LINES,
+}: {
+	pullRequest: PullRequestItem
+	contentWidth: number
+	bodyLines?: number
+}) => {
+	const previewLines = useMemo(
+		() => bodyPreview(pullRequest.body, contentWidth, bodyLines),
+		[pullRequest.body, contentWidth, bodyLines],
+	)
+
+	return (
+		<box flexDirection="column" paddingLeft={1} paddingRight={1}>
+			{previewLines.map((line, index) => (
+				<TextLine key={`${pullRequest.url}-${index}`}>
+					{line.segments.map((segment, segmentIndex) => (
+						("bold" in segment && segment.bold === true) ? (
+							<span key={segmentIndex} fg={segment.fg} attributes={TextAttributes.BOLD}>
+								{segment.text}
+							</span>
+						) : (
+							<span key={segmentIndex} fg={segment.fg}>
+								{segment.text}
+							</span>
+						)
+					))}
+				</TextLine>
 			))}
 		</box>
 	)
@@ -513,103 +748,121 @@ const DetailsPane = ({
 	contentWidth,
 	bodyLines = DETAIL_BODY_LINES,
 	paneWidth = contentWidth + 2,
+	showChecks = false,
 }: {
 	pullRequest: PullRequestItem | null
 	contentWidth: number
 	bodyLines?: number
 	paneWidth?: number
+	showChecks?: boolean
 }) => {
+	const titleLines = pullRequest ? wrapText(pullRequest.title, Math.max(1, paneWidth - 2)).length : 1
+	const uniqueChecks = pullRequest ? deduplicateChecks(pullRequest.checks) : []
+	const checkRows = checksRowCount(uniqueChecks)
+	// checks heading (1) + grid rows + divider (1)
+	const checksHeight = showChecks && uniqueChecks.length > 0 ? 1 + checkRows + 1 : 0
 	const previewLines = useMemo(
 		() => (pullRequest ? bodyPreview(pullRequest.body, contentWidth, bodyLines) : []),
 		[pullRequest?.body, contentWidth, bodyLines],
 	)
-	const paddedPreviewLines = [
-		...previewLines,
-		...Array.from({ length: Math.max(0, bodyLines - previewLines.length) }, () => ({ segments: [{ text: "", fg: colors.muted }] } satisfies PreviewLine)),
-	]
-	const labels = pullRequest?.labels ?? []
+	const contentHeight = titleLines + 2 + 1 + checksHeight + previewLines.length
 
 	return (
-		<box flexDirection="column" height={bodyLines + 7}>
-			<box paddingLeft={1} paddingRight={1}>
-				<SectionTitle title="DETAILS" />
-			</box>
+		<box flexDirection="column" height={contentHeight}>
 			{pullRequest ? (
 				<>
-					<box flexDirection="column" paddingLeft={1} paddingRight={1}>
-						<TextLine>
-							<span>{pullRequest.title}</span>
-						</TextLine>
-						{(() => {
-						const review = reviewLabel(pullRequest) ?? "none"
-						const checks = (pullRequest.checkSummary ?? "none").replace(/^checks\s+/, "")
-						const repoAndNumber = `${shortRepoName(pullRequest.repository)}${SEPARATOR}#${pullRequest.number}`
-						const gap = Math.max(2, contentWidth - repoAndNumber.length - review.length - checks.length - SEPARATOR.length)
-
-						return (
-							<TextLine>
-								<span fg={repoColor(pullRequest.repository)}>{shortRepoName(pullRequest.repository)}</span>
-								<span fg={colors.separator}>{SEPARATOR}</span>
-								<span fg={colors.count}>#{pullRequest.number}</span>
-								<span fg={colors.muted}>{" ".repeat(gap)}</span>
-								<span fg={statusColor(pullRequest.reviewStatus)}>{review}</span>
-								<span fg={colors.separator}>{SEPARATOR}</span>
-								<span fg={statusColor(pullRequest.checkStatus)}>{checks}</span>
-							</TextLine>
-						)
-					})()}
-						{(() => {
-						const opened = formatShortDate(pullRequest.createdAt)
-						const age = `${daysOpen(pullRequest.createdAt)}d`
-						const gap = Math.max(2, contentWidth - opened.length - age.length)
-
-						return (
-							<TextLine>
-								<span fg={colors.muted}>{opened}</span>
-								<span fg={colors.muted}>{" ".repeat(gap)}</span>
-								<span fg={colors.muted}>{age}</span>
-							</TextLine>
-						)
-					})()}
-						<PlainLine text={pullRequest.url} fg={colors.muted} />
-						<TextLine>
-							{labels.length > 0 ? labels.map((label, index) => (
-								<Fragment key={label.name}>
-									{index > 0 ? <span fg={colors.muted}> </span> : null}
-									<span bg={labelColor(label)} fg={labelTextColor(labelColor(label))}> {label.name} </span>
-								</Fragment>
-							)) : <span fg={colors.muted}>no labels</span>}
-						</TextLine>
-					</box>
-					<Divider width={paneWidth} />
-					<box flexDirection="column" paddingLeft={1} paddingRight={1}>
-						{paddedPreviewLines.map((line, index) => (
-							<TextLine key={`${pullRequest.url}-${index}`}>
-								{line.segments.map((segment, segmentIndex) => (
-									("bold" in segment && segment.bold === true) ? (
-										<span key={segmentIndex} fg={segment.fg} attributes={TextAttributes.BOLD}>
-											{segment.text}
-										</span>
-									) : (
-										<span key={segmentIndex} fg={segment.fg}>
-											{segment.text}
-										</span>
-									)
-								))}
-							</TextLine>
-						))}
-					</box>
+					<DetailHeader pullRequest={pullRequest} contentWidth={contentWidth} paneWidth={paneWidth} showChecks={showChecks} />
+					<DetailBody pullRequest={pullRequest} contentWidth={contentWidth} bodyLines={bodyLines} />
 				</>
 			) : (
-				<>
-					<box flexDirection="column" paddingLeft={1} paddingRight={1}>
-						<PlainLine text="Select a pull request with up/down." fg={colors.muted} />
-						{Array.from({ length: DETAIL_BODY_LINES + 2 }, (_, index) => (
-							<BlankRow key={index} />
-						))}
-					</box>
-				</>
+				<box flexDirection="column" paddingLeft={1} paddingRight={1}>
+					<PlainLine text="Select a pull request with up/down." fg={colors.muted} />
+					{Array.from({ length: DETAIL_BODY_LINES + 2 }, (_, index) => (
+						<BlankRow key={index} />
+					))}
+				</box>
 			)}
+		</box>
+	)
+}
+
+const LabelModal = ({
+	state,
+	currentLabels,
+	modalWidth,
+	modalHeight,
+	offsetLeft,
+	offsetTop,
+}: {
+	state: LabelModalState
+	currentLabels: readonly PullRequestLabel[]
+	modalWidth: number
+	modalHeight: number
+	offsetLeft: number
+	offsetTop: number
+}) => {
+	const contentWidth = modalWidth - 4
+	const currentNames = new Set(currentLabels.map((l) => l.name.toLowerCase()))
+	const filtered = state.availableLabels.filter((label) =>
+		state.query.length === 0 || label.name.toLowerCase().includes(state.query.toLowerCase()),
+	)
+	const maxVisible = modalHeight - 5
+	const visibleLabels = filtered.slice(0, maxVisible)
+
+	return (
+		<box
+			position="absolute"
+			left={offsetLeft}
+			top={offsetTop}
+			width={modalWidth}
+			height={modalHeight}
+			flexDirection="column"
+			backgroundColor="#1a1a2e"
+		>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.accent} attributes={TextAttributes.BOLD}>Labels</span>
+				</TextLine>
+			</box>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.count}>&gt; </span>
+					<span fg={state.query.length > 0 ? colors.text : colors.muted}>
+						{state.query.length > 0 ? state.query : "type to filter..."}
+					</span>
+				</TextLine>
+			</box>
+			<Divider width={modalWidth} />
+			<box flexDirection="column" paddingLeft={1} paddingRight={1}>
+				{state.loading ? (
+					<PlainLine text="Loading labels..." fg={colors.muted} />
+				) : visibleLabels.length === 0 ? (
+					<PlainLine text={state.query.length > 0 ? "No matching labels." : "No labels found."} fg={colors.muted} />
+				) : (
+					visibleLabels.map((label, index) => {
+						const isActive = currentNames.has(label.name.toLowerCase())
+						const isSelected = index === state.selectedIndex
+						return (
+							<box key={label.name} height={1}>
+								<TextLine bg={isSelected ? colors.selectedBg : undefined}>
+									<span fg={isActive ? colors.status.passing : colors.muted}>{isActive ? "✓ " : "  "}</span>
+									<span bg={labelColor(label)} fg={labelTextColor(labelColor(label))}> {fitCell(label.name, Math.min(label.name.length, contentWidth - 6))} </span>
+								</TextLine>
+							</box>
+						)
+					})
+				)}
+			</box>
+			<box flexGrow={1} />
+			<Divider width={modalWidth} />
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.count}>enter</span>
+					<span fg={colors.muted}> toggle  </span>
+					<span fg={colors.count}>esc</span>
+					<span fg={colors.muted}> close</span>
+				</TextLine>
+			</box>
 		</box>
 	)
 }
@@ -625,8 +878,13 @@ export const App = () => {
 	const [filterMode, setFilterMode] = useAtom(filterModeAtom)
 	const [pendingG, setPendingG] = useAtom(pendingGAtom)
 	const [detailFullView, setDetailFullView] = useAtom(detailFullViewAtom)
+	const [_detailScrollOffset, setDetailScrollOffset] = useAtom(detailScrollOffsetAtom)
+	const [labelModal, setLabelModal] = useAtom(labelModalAtom)
+	const [username, setUsername] = useAtom(usernameAtom)
+	const [groupIconIndex, setGroupIconIndex] = useAtom(groupIconIndexAtom)
+	const groupIcon = GROUP_ICONS[groupIconIndex % GROUP_ICONS.length]!
 	const contentWidth = Math.max(60, width ?? 100)
-	const isWideLayout = (width ?? 100) >= 140
+	const isWideLayout = (width ?? 100) >= 100
 	const splitGap = 1
 	const sectionPadding = 1
 	const leftPaneWidth = isWideLayout ? Math.max(44, Math.floor((contentWidth - splitGap) * 0.56)) : contentWidth
@@ -634,8 +892,8 @@ export const App = () => {
 	const dividerJunctionAt = Math.max(1, leftPaneWidth)
 	const leftContentWidth = isWideLayout ? Math.max(24, leftPaneWidth - 3) : Math.max(24, contentWidth - sectionPadding * 2)
 	const rightContentWidth = isWideLayout ? Math.max(24, rightPaneWidth - sectionPadding * 2) : Math.max(24, contentWidth - sectionPadding * 2)
-	const wideDetailLines = Math.max(8, Math.min(16, (height ?? 24) - 12))
-	const wideBodyHeight = Math.max(8, (height ?? 24) - 5)
+	const wideDetailLines = Math.max(8, (height ?? 24) - 8) // fill available vertical space
+	const wideBodyHeight = Math.max(8, (height ?? 24) - 4)
 	const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 	const pendingGTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 	const headerFooterWidth = Math.max(24, contentWidth - 2)
@@ -658,6 +916,28 @@ export const App = () => {
 			clearTimeout(pendingGTimeoutRef.current)
 		}
 	}, [])
+
+	useEffect(() => {
+		let cancelled = false
+		if (config.author !== "@me") {
+			setUsername(config.author.replace(/^@/, ""))
+			return () => {
+				cancelled = true
+			}
+		}
+
+		void getAuthenticatedUser()
+			.then((login) => {
+				if (!cancelled) setUsername(login)
+			})
+			.catch(() => {
+				if (!cancelled) setUsername(null)
+			})
+
+		return () => {
+			cancelled = true
+		}
+	}, [setUsername])
 
 	useEffect(() => {
 		let cancelled = false
@@ -704,8 +984,7 @@ export const App = () => {
 
 	const visibleGroups = groupBy(
 		filteredPullRequests,
-		(pullRequest) => shortRepoName(pullRequest.repository),
-		config.repos.map(shortRepoName),
+		(pullRequest) => pullRequest.repository,
 	)
 	const visiblePullRequests = visibleGroups.flatMap(([, pullRequests]) => pullRequests)
 	const groupStarts = visibleGroups.reduce<Array<number>>((starts, [, pullRequests], index) => {
@@ -722,14 +1001,12 @@ export const App = () => {
 		}
 		return 0
 	}
-	const repoNames = config.repos.map(shortRepoName)
-	const reposLine = `repos: ${repoNames.join(", ")}`
 	const summaryRight = pullRequestState.fetchedAt
 		? `updated ${formatShortDate(pullRequestState.fetchedAt)} ${formatTimestamp(pullRequestState.fetchedAt)}`
 		: pullRequestState.status === "loading"
 			? "loading pull requests..."
 			: ""
-	const headerLeft = `GHUI  ${reposLine}`
+	const headerLeft = username ? `GHUI  ${username}` : "GHUI"
 	const headerLine = `${fitCell(headerLeft, Math.max(0, headerFooterWidth - summaryRight.length))}${summaryRight}`
 	const footerNotice = notice ? fitCell(notice, headerFooterWidth) : null
 	const selectPullRequestByUrl = (url: string) => {
@@ -755,17 +1032,163 @@ export const App = () => {
 	}, [visiblePullRequests.length])
 
 	const selectedPullRequest = visiblePullRequests[selectedIndex] ?? null
+	const titleWrapWidth = Math.max(1, rightPaneWidth - 2) // account for paddingLeft/paddingRight in detail pane
+	const titleLines = selectedPullRequest ? wrapText(selectedPullRequest.title, titleWrapWidth).length : 1
+	const detailDividerRow = 1 + titleLines + 1 // info row + title lines + labels row
+	const detailChecks = selectedPullRequest ? deduplicateChecks(selectedPullRequest.checks) : []
+	const checksRows = checksRowCount(detailChecks)
+	// checks heading (1) + grid rows + divider
+	const checksDividerRow = detailChecks.length > 0 ? detailDividerRow + 1 + checksRows + 1 : -1
+	const detailJunctions = detailChecks.length > 0 ? [detailDividerRow, checksDividerRow] : [detailDividerRow]
+
+	const halfPage = Math.max(1, Math.floor(wideBodyHeight / 2))
+
+	const openLabelModal = () => {
+		if (!selectedPullRequest) return
+		setLabelModal((current) => ({ ...current, open: true, query: "", selectedIndex: 0, loading: true }))
+		void listRepoLabels(selectedPullRequest.repository)
+			.then((labels) => {
+				setLabelModal((current) => ({ ...current, availableLabels: labels, loading: false }))
+			})
+			.catch((error) => {
+				setLabelModal((current) => ({ ...current, loading: false }))
+				flashNotice(error instanceof Error ? error.message : String(error))
+			})
+	}
+
+	const toggleLabelAtIndex = () => {
+		if (!selectedPullRequest) return
+		const filtered = labelModal.availableLabels.filter((label) =>
+			labelModal.query.length === 0 || label.name.toLowerCase().includes(labelModal.query.toLowerCase()),
+		)
+		const label = filtered[labelModal.selectedIndex]
+		if (!label) return
+
+		const isActive = selectedPullRequest.labels.some((l) => l.name.toLowerCase() === label.name.toLowerCase())
+		const previousPullRequest = selectedPullRequest
+
+		if (isActive) {
+			updatePullRequest(selectedPullRequest.url, (pr) => ({
+				...pr,
+				labels: pr.labels.filter((l) => l.name.toLowerCase() !== label.name.toLowerCase()),
+			}))
+			void removePullRequestLabel(selectedPullRequest.repository, selectedPullRequest.number, label.name)
+				.then(() => flashNotice(`Removed ${label.name} from #${selectedPullRequest.number}`))
+				.catch((error) => {
+					updatePullRequest(selectedPullRequest.url, () => previousPullRequest)
+					flashNotice(error instanceof Error ? error.message : String(error))
+				})
+		} else {
+			updatePullRequest(selectedPullRequest.url, (pr) => ({
+				...pr,
+				labels: [...pr.labels, { name: label.name, color: label.color }],
+			}))
+			void addPullRequestLabel(selectedPullRequest.repository, selectedPullRequest.number, label.name)
+				.then(() => flashNotice(`Added ${label.name} to #${selectedPullRequest.number}`))
+				.catch((error) => {
+					updatePullRequest(selectedPullRequest.url, () => previousPullRequest)
+					flashNotice(error instanceof Error ? error.message : String(error))
+				})
+		}
+	}
 
 	useKeyboard((key) => {
 		if (key.name === "q" || (key.ctrl && key.name === "c")) {
+			if (labelModal.open) {
+				setLabelModal(initialLabelModalState)
+				return
+			}
+			if (key.name === "q") {
+				process.exit(0)
+			}
 			process.exit(0)
 		}
 
-		if (detailFullView) {
-			if (key.name === "escape" || key.name === "return" || key.name === "enter") {
-				setDetailFullView(false)
+		// Label modal takes priority over everything else
+		if (labelModal.open) {
+			if (key.name === "escape") {
+				setLabelModal(initialLabelModalState)
 				return
 			}
+			if (key.name === "return" || key.name === "enter") {
+				toggleLabelAtIndex()
+				return
+			}
+			if (key.name === "up" || key.name === "k") {
+				setLabelModal((current) => ({
+					...current,
+					selectedIndex: Math.max(0, current.selectedIndex - 1),
+				}))
+				return
+			}
+			if (key.name === "down" || key.name === "j") {
+				const filtered = labelModal.availableLabels.filter((label) =>
+					labelModal.query.length === 0 || label.name.toLowerCase().includes(labelModal.query.toLowerCase()),
+				)
+				setLabelModal((current) => ({
+					...current,
+					selectedIndex: Math.min(filtered.length - 1, current.selectedIndex + 1),
+				}))
+				return
+			}
+			if (key.name === "backspace") {
+				setLabelModal((current) => ({
+					...current,
+					query: current.query.slice(0, -1),
+					selectedIndex: 0,
+				}))
+				return
+			}
+			if (key.ctrl && key.name === "u") {
+				setLabelModal((current) => ({ ...current, query: "", selectedIndex: 0 }))
+				return
+			}
+			if (!key.ctrl && !key.meta && key.sequence.length === 1) {
+				setLabelModal((current) => ({
+					...current,
+					query: current.query + key.sequence,
+					selectedIndex: 0,
+				}))
+				return
+			}
+			return
+		}
+
+		// Fullscreen detail mode: scroll with j/k, Ctrl-D/U, exit with Escape/Enter
+		if (detailFullView) {
+			if (key.name === "escape" || (key.name === "return" || key.name === "enter")) {
+				setDetailFullView(false)
+				setDetailScrollOffset(0)
+				return
+			}
+			if (key.name === "up" || key.name === "k") {
+				setDetailScrollOffset((current) => Math.max(0, current - 1))
+				return
+			}
+			if (key.name === "down" || key.name === "j") {
+				setDetailScrollOffset((current) => current + 1)
+				return
+			}
+			if (key.ctrl && key.name === "u") {
+				setDetailScrollOffset((current) => Math.max(0, current - halfPage))
+				return
+			}
+			if (key.ctrl && (key.name === "d" || key.name === "v")) {
+				setDetailScrollOffset((current) => current + halfPage)
+				return
+			}
+			if (key.name === "o" && selectedPullRequest) {
+				void Bun.spawn({ cmd: ["open", selectedPullRequest.url], stdout: "ignore", stderr: "ignore" })
+				flashNotice(`Opened #${selectedPullRequest.number} in browser`)
+				return
+			}
+			if (key.name === "y" && selectedPullRequest) {
+				void copyPullRequestMetadata(selectedPullRequest)
+					.then(() => flashNotice(`Copied #${selectedPullRequest.number} metadata`))
+					.catch((error) => flashNotice(error instanceof Error ? error.message : String(error)))
+				return
+			}
+			return
 		}
 
 		if (filterMode) {
@@ -840,6 +1263,20 @@ export const App = () => {
 			})
 			return
 		}
+		if (key.ctrl && key.name === "u") {
+			setSelectedIndex((current) => {
+				if (visiblePullRequests.length === 0) return 0
+				return Math.max(0, current - halfPage)
+			})
+			return
+		}
+		if (key.ctrl && key.name === "d") {
+			setSelectedIndex((current) => {
+				if (visiblePullRequests.length === 0) return 0
+				return Math.min(visiblePullRequests.length - 1, current + halfPage)
+			})
+			return
+		}
 		if (key.name === "up" || key.name === "k") {
 			setSelectedIndex((current) => {
 				if (visiblePullRequests.length === 0) return 0
@@ -856,7 +1293,7 @@ export const App = () => {
 		}
 		// Vim-style navigation: gg to go to top, G to go to bottom
 		if (key.name === "G" || key.name === "g" && key.shift) {
-			setSelectedIndex((current) => {
+			setSelectedIndex((_current) => {
 				if (visiblePullRequests.length === 0) return 0
 				return visiblePullRequests.length - 1
 			})
@@ -864,7 +1301,6 @@ export const App = () => {
 		}
 		if (key.name === "g") {
 			if (pendingG) {
-				// Second g - go to top
 				setSelectedIndex(0)
 				setPendingG(false)
 				if (pendingGTimeoutRef.current !== null) {
@@ -872,7 +1308,6 @@ export const App = () => {
 					pendingGTimeoutRef.current = null
 				}
 			} else {
-				// First g - set pending and start timeout
 				setPendingG(true)
 				pendingGTimeoutRef.current = setTimeout(() => {
 					setPendingG(false)
@@ -883,6 +1318,19 @@ export const App = () => {
 		}
 		if ((key.name === "return" || key.name === "enter") && !detailFullView) {
 			setDetailFullView(true)
+			setDetailScrollOffset(0)
+			return
+		}
+		if (key.name === "l" && selectedPullRequest) {
+			openLabelModal()
+			return
+		}
+		if (key.name === "p" || key.name === "P") {
+			setGroupIconIndex((current) => {
+				const next = (current + 1) % GROUP_ICONS.length
+				flashNotice(`icon: ${GROUP_ICONS[next]}`)
+				return next
+			})
 			return
 		}
 		if (key.name === "o" && selectedPullRequest) {
@@ -907,25 +1355,6 @@ export const App = () => {
 				})
 			return
 		}
-		if ((key.name === "b" || key.name === "B") && selectedPullRequest) {
-			const previousPullRequest = selectedPullRequest
-			const nextHasBeta = !hasLabel(selectedPullRequest, "beta")
-			updatePullRequest(selectedPullRequest.url, (pullRequest) => ({
-				...pullRequest,
-				labels: hasLabel(pullRequest, "beta")
-					? pullRequest.labels.filter((label) => label.name.toLowerCase() !== "beta")
-					: [...pullRequest.labels, { name: "beta", color: "#5C17FD" }],
-			}))
-			void toggleBeta(selectedPullRequest.repository, selectedPullRequest.number, hasLabel(selectedPullRequest, "beta"))
-				.then(() => {
-					flashNotice(nextHasBeta ? `Added beta to #${selectedPullRequest.number}` : `Removed beta from #${selectedPullRequest.number}`)
-				})
-				.catch((error) => {
-					updatePullRequest(selectedPullRequest.url, () => previousPullRequest)
-					flashNotice(error instanceof Error ? error.message : String(error))
-				})
-			return
-		}
 		if (key.name === "y" && selectedPullRequest) {
 			void copyPullRequestMetadata(selectedPullRequest)
 				.then(() => {
@@ -937,91 +1366,114 @@ export const App = () => {
 		}
 	})
 
+	const fullscreenContentWidth = Math.max(24, contentWidth - 2)
+	const fullscreenBodyLines = Math.max(8, (height ?? 24) - 8)
+
+	const prListProps = {
+		groups: visibleGroups,
+		selectedUrl: selectedPullRequest?.url ?? null,
+		status: pullRequestState.status,
+		error: pullRequestState.error,
+		filterText: visibleFilterText,
+		showFilterBar: filterMode || filterQuery.length > 0,
+		isFilterEditing: filterMode,
+		groupIcon,
+		onSelectPullRequest: selectPullRequestByUrl,
+	} as const
+
+	const labelModalWidth = Math.min(40, contentWidth - 4)
+	const labelModalHeight = Math.min(20, (height ?? 24) - 4)
+	const labelModalLeft = Math.floor((contentWidth - labelModalWidth) / 2)
+	const labelModalTop = Math.floor(((height ?? 24) - labelModalHeight) / 2)
+
 	return (
 		<box flexGrow={1} flexDirection="column">
 			<box paddingLeft={1} paddingRight={1} flexDirection="column">
 				<PlainLine text={headerLine} fg={colors.muted} bold />
 			</box>
-			{isWideLayout ? <Divider width={contentWidth} junctionAt={dividerJunctionAt} junctionChar="┬" /> : <Divider width={contentWidth} />}
-			{isWideLayout ? (
+			{isWideLayout && !detailFullView ? (
+				<Divider width={contentWidth} junctionAt={dividerJunctionAt} junctionChar="┬" />
+			) : (
+				<Divider width={contentWidth} />
+			)}
+			{isWideLayout && detailFullView ? (
+				<box flexGrow={1} flexDirection="column">
+					<scrollbox flexGrow={1}>
+						<DetailsPane
+							pullRequest={selectedPullRequest}
+							contentWidth={fullscreenContentWidth}
+							bodyLines={fullscreenBodyLines}
+							paneWidth={contentWidth}
+							showChecks
+						/>
+					</scrollbox>
+				</box>
+			) : isWideLayout ? (
 				<box flexGrow={1} flexDirection="row">
 					<box width={leftPaneWidth} height={wideBodyHeight} flexDirection="column" paddingLeft={sectionPadding} paddingRight={sectionPadding}>
 						<scrollbox height={wideBodyHeight} flexGrow={0}>
-							<PullRequestList
-								groups={visibleGroups}
-								selectedUrl={selectedPullRequest?.url ?? null}
-								status={pullRequestState.status}
-								error={pullRequestState.error}
-								contentWidth={leftContentWidth}
-								filterText={visibleFilterText}
-								showFilterBar={filterMode || filterQuery.length > 0}
-								isFilterEditing={filterMode}
-								onSelectPullRequest={selectPullRequestByUrl}
-							/>
+							<PullRequestList {...prListProps} contentWidth={leftContentWidth} />
 						</scrollbox>
 					</box>
-					<SeparatorColumn height={wideBodyHeight} junctionRow={DETAIL_DIVIDER_ROW} />
+					<SeparatorColumn height={wideBodyHeight} junctionRows={detailJunctions} />
 					<box width={rightPaneWidth} height={wideBodyHeight} flexDirection="column">
-						<scrollbox height={wideBodyHeight} flexGrow={0}>
-							<DetailsPane pullRequest={selectedPullRequest} contentWidth={rightContentWidth} bodyLines={wideDetailLines} paneWidth={rightPaneWidth} />
-						</scrollbox>
+						{selectedPullRequest ? (
+							<>
+								<DetailHeader pullRequest={selectedPullRequest} contentWidth={rightContentWidth} paneWidth={rightPaneWidth} showChecks />
+								<scrollbox flexGrow={1}>
+									<DetailBody pullRequest={selectedPullRequest} contentWidth={rightContentWidth} bodyLines={wideDetailLines} />
+								</scrollbox>
+							</>
+						) : (
+							<box flexDirection="column" paddingLeft={1} paddingRight={1}>
+								<PlainLine text="Select a pull request with up/down." fg={colors.muted} />
+							</box>
+						)}
 					</box>
 				</box>
 			) : detailFullView ? (
-				<>
-					<DetailsPane
-						pullRequest={selectedPullRequest}
-						contentWidth={rightContentWidth}
-						bodyLines={Math.max(8, (height ?? 24) - 10)}
-						paneWidth={contentWidth}
-					/>
-					<Divider width={contentWidth} />
-					<box height={8} flexDirection="column">
-						<scrollbox height={8}>
-							<box paddingLeft={sectionPadding} paddingRight={sectionPadding}>
-								<PullRequestList
-									groups={visibleGroups}
-									selectedUrl={selectedPullRequest?.url ?? null}
-									status={pullRequestState.status}
-									error={pullRequestState.error}
-									contentWidth={leftContentWidth}
-									filterText={visibleFilterText}
-									showFilterBar={filterMode || filterQuery.length > 0}
-									isFilterEditing={filterMode}
-									onSelectPullRequest={selectPullRequestByUrl}
-								/>
-							</box>
-						</scrollbox>
-					</box>
-				</>
+				<box flexGrow={1} flexDirection="column">
+					<scrollbox flexGrow={1}>
+						<DetailsPane
+							pullRequest={selectedPullRequest}
+							contentWidth={fullscreenContentWidth}
+							bodyLines={fullscreenBodyLines}
+							paneWidth={contentWidth}
+						/>
+					</scrollbox>
+				</box>
 			) : (
 				<>
+					<DetailsPane pullRequest={selectedPullRequest} contentWidth={rightContentWidth} paneWidth={contentWidth} />
+					<Divider width={contentWidth} />
 					<box flexGrow={1} flexDirection="column">
 						<scrollbox flexGrow={1}>
 							<box paddingLeft={sectionPadding} paddingRight={sectionPadding}>
-								<PullRequestList
-									groups={visibleGroups}
-									selectedUrl={selectedPullRequest?.url ?? null}
-									status={pullRequestState.status}
-									error={pullRequestState.error}
-									contentWidth={leftContentWidth}
-									filterText={visibleFilterText}
-									showFilterBar={filterMode || filterQuery.length > 0}
-									isFilterEditing={filterMode}
-									onSelectPullRequest={selectPullRequestByUrl}
-								/>
+								<PullRequestList {...prListProps} contentWidth={leftContentWidth} />
 							</box>
 						</scrollbox>
 					</box>
-					<Divider width={contentWidth} />
-					<DetailsPane pullRequest={selectedPullRequest} contentWidth={rightContentWidth} paneWidth={contentWidth} />
 				</>
 			)}
 
-			{isWideLayout ? <Divider width={contentWidth} junctionAt={dividerJunctionAt} junctionChar="┴" /> : <Divider width={contentWidth} />}
+			{isWideLayout && !detailFullView ? (
+				<Divider width={contentWidth} junctionAt={dividerJunctionAt} junctionChar="┴" />
+			) : (
+				<Divider width={contentWidth} />
+			)}
 			<box paddingLeft={1} paddingRight={1}>
 				{footerNotice ? <PlainLine text={footerNotice} fg={colors.count} /> : <FooterHints showFilterClear={filterMode || filterQuery.length > 0} detailFullView={detailFullView} />}
 			</box>
+			{labelModal.open ? (
+				<LabelModal
+					state={labelModal}
+					currentLabels={selectedPullRequest?.labels ?? []}
+					modalWidth={labelModalWidth}
+					modalHeight={labelModalHeight}
+					offsetLeft={labelModalLeft}
+					offsetTop={labelModalTop}
+				/>
+			) : null}
 		</box>
 	)
 }

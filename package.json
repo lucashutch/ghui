@@ -3,7 +3,28 @@
 	"version": "0.1.0",
 	"description": "Terminal UI for GitHub pull requests",
 	"type": "module",
-	"private": true,
+	"license": "MIT",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/kitlangton/ghui.git"
+	},
+	"bugs": {
+		"url": "https://github.com/kitlangton/ghui/issues"
+	},
+	"homepage": "https://github.com/kitlangton/ghui#readme",
+	"keywords": [
+		"github",
+		"pull-requests",
+		"terminal",
+		"tui",
+		"bun"
+	],
+	"files": [
+		"src",
+		"README.md",
+		".env.example",
+		"LICENSE"
+	],
 	"bin": {
 		"ghui": "./src/index.tsx"
 	},

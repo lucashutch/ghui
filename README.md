@@ -1,6 +1,6 @@
 # ghui
 
-Minimal terminal UI for browsing and acting on your GitHub pull requests.
+Minimal terminal UI for browsing and acting on your open GitHub pull requests across repositories.
 
 ## Requirements
 
@@ -19,14 +19,13 @@ Then run `ghui` from anywhere.
 
 ## Configuration
 
-- `GHUI_REPOS`: comma-separated list of repos to query, for example `owner/repo,owner/another-repo`
-- `GHUI_AUTHOR`: author passed to `gh pr list`, defaults to `@me`
-- `GHUI_PR_FETCH_LIMIT`: max PRs fetched per repo, defaults to `200`
+- `GHUI_AUTHOR`: author passed to `gh search prs`, defaults to `@me`
+- `GHUI_PR_FETCH_LIMIT`: max PRs fetched, defaults to `200`
 
 Example:
 
 ```bash
-GHUI_REPOS=cli/cli,oven-sh/bun ghui
+GHUI_AUTHOR=@me ghui
 ```
 
 You can also copy `.env.example` to `.env` and edit the values locally.

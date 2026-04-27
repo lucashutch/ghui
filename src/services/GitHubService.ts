@@ -1,5 +1,5 @@
 import { config } from "../config.js"
-import type { PullRequestItem } from "../domain.js"
+import type { CheckItem, PullRequestItem, PullRequestLabel } from "../domain.js"
 import { run, runJson } from "./CommandRunner.js"
 
 interface GitHubListPullRequest {
@@ -13,8 +13,11 @@ interface GitHubListPullRequest {
 	readonly isDraft: boolean
 	readonly reviewDecision: string
 	readonly statusCheckRollup: readonly {
+		readonly name?: string | null
+		readonly context?: string | null
 		readonly status?: string | null
 		readonly conclusion?: string | null
+		readonly state?: string | null
 	}[]
 	readonly state: string
 	readonly createdAt: string
@@ -22,7 +25,19 @@ interface GitHubListPullRequest {
 	readonly url: string
 }
 
-const jsonFields = "number,title,body,labels,isDraft,reviewDecision,statusCheckRollup,state,createdAt,closedAt,url"
+interface GitHubSearchPullRequest {
+	readonly number: number
+	readonly repository: {
+		readonly nameWithOwner: string
+	}
+}
+
+interface GitHubViewer {
+	readonly login: string
+}
+
+const searchJsonFields = "repository,number"
+const detailJsonFields = "number,title,body,labels,isDraft,reviewDecision,statusCheckRollup,state,createdAt,closedAt,url"
 
 const normalizeDate = (value: string | null | undefined) => {
 	if (!value || value.startsWith("0001-01-01")) return null
@@ -37,17 +52,43 @@ const getReviewStatus = (item: GitHubListPullRequest): PullRequestItem["reviewSt
 	return "none"
 }
 
-const getCheckInfo = (item: GitHubListPullRequest): Pick<PullRequestItem, "checkStatus" | "checkSummary"> => {
+const normalizeCheckStatus = (raw?: string | null): CheckItem["status"] => {
+	if (raw === "COMPLETED") return "completed"
+	if (raw === "IN_PROGRESS") return "in_progress"
+	if (raw === "QUEUED") return "queued"
+	return "pending"
+}
+
+const normalizeCheckConclusion = (raw?: string | null): CheckItem["conclusion"] => {
+	if (raw === "SUCCESS") return "success"
+	if (raw === "FAILURE" || raw === "ERROR") return "failure"
+	if (raw === "NEUTRAL") return "neutral"
+	if (raw === "SKIPPED") return "skipped"
+	if (raw === "CANCELLED") return "cancelled"
+	if (raw === "TIMED_OUT") return "timed_out"
+	return null
+}
+
+const getCheckInfo = (item: GitHubListPullRequest): Pick<PullRequestItem, "checkStatus" | "checkSummary" | "checks"> => {
 	if (item.statusCheckRollup.length === 0) {
-		return { checkStatus: "none", checkSummary: null }
+		return { checkStatus: "none", checkSummary: null, checks: [] }
 	}
 
 	let completed = 0
 	let successful = 0
 	let pending = false
 	let failing = false
+	const checks: CheckItem[] = []
 
 	for (const check of item.statusCheckRollup) {
+		const name = check.name ?? check.context ?? "check"
+
+		checks.push({
+			name,
+			status: normalizeCheckStatus(check.status),
+			conclusion: normalizeCheckConclusion(check.conclusion),
+		})
+
 		if (check.status === "COMPLETED") {
 			completed += 1
 		} else {
@@ -62,14 +103,14 @@ const getCheckInfo = (item: GitHubListPullRequest): Pick<PullRequestItem, "check
 	}
 
 	if (pending) {
-		return { checkStatus: "pending", checkSummary: `checks ${completed}/${item.statusCheckRollup.length}` }
+		return { checkStatus: "pending", checkSummary: `checks ${completed}/${item.statusCheckRollup.length}`, checks }
 	}
 
 	if (failing) {
-		return { checkStatus: "failing", checkSummary: `checks ${successful}/${item.statusCheckRollup.length}` }
+		return { checkStatus: "failing", checkSummary: `checks ${successful}/${item.statusCheckRollup.length}`, checks }
 	}
 
-	return { checkStatus: "passing", checkSummary: `checks ${successful}/${item.statusCheckRollup.length}` }
+	return { checkStatus: "passing", checkSummary: `checks ${successful}/${item.statusCheckRollup.length}`, checks }
 }
 
 const parsePullRequest = (repository: string, item: GitHubListPullRequest): PullRequestItem => {
@@ -88,42 +129,65 @@ const parsePullRequest = (repository: string, item: GitHubListPullRequest): Pull
 		reviewStatus: getReviewStatus(item),
 		checkStatus: checkInfo.checkStatus,
 		checkSummary: checkInfo.checkSummary,
+		checks: checkInfo.checks,
 		createdAt: new Date(item.createdAt),
 		closedAt: normalizeDate(item.closedAt),
 		url: item.url,
 	}
 }
 
-const listOpenArgs = (repository: string, author: string) => [
-	"pr",
-	"list",
-	"--repo",
-	repository,
+const searchOpenArgs = (author: string) => [
+	"search",
+	"prs",
 	"--author",
 	author,
 	"--state",
 	"open",
 	"--limit",
 	String(config.prFetchLimit),
+	"--sort",
+	"created",
+	"--order",
+	"desc",
 	"--json",
-	jsonFields,
+	searchJsonFields,
 ] as const
 
 export const listOpenPullRequests = async (): Promise<readonly PullRequestItem[]> => {
-	const groups = await Promise.all(
-		config.repos.map(async (repository) => {
-			const pullRequests = await runJson<readonly GitHubListPullRequest[]>("gh", [...listOpenArgs(repository, config.author)])
-			return pullRequests.map((pullRequest) => parsePullRequest(repository, pullRequest))
+	const searchResults = await runJson<readonly GitHubSearchPullRequest[]>("gh", [...searchOpenArgs(config.author)])
+	const pullRequests = await Promise.all(
+		searchResults.map(async (searchResult) => {
+			const repository = searchResult.repository.nameWithOwner
+			const pullRequest = await runJson<GitHubListPullRequest>("gh", [
+				"pr", "view", String(searchResult.number), "--repo", repository, "--json", detailJsonFields,
+			])
+			return parsePullRequest(repository, pullRequest)
 		}),
 	)
 
-	return groups.flat().sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+	return pullRequests.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+}
+
+export const getAuthenticatedUser = async () => {
+	const viewer = await runJson<GitHubViewer>("gh", ["api", "user"])
+	return viewer.login
 }
 
 export const toggleDraftStatus = async (repository: string, number: number, isDraft: boolean) => {
 	await run("gh", ["pr", "ready", String(number), "--repo", repository, ...(isDraft ? [] : ["--undo"])])
 }
 
-export const toggleBetaLabel = async (repository: string, number: number, hasBeta: boolean) => {
-	await run("gh", ["pr", "edit", String(number), "--repo", repository, ...(hasBeta ? ["--remove-label", "beta"] : ["--add-label", "beta"])])
+export const listRepoLabels = async (repository: string): Promise<readonly PullRequestLabel[]> => {
+	const labels = await runJson<readonly { name: string; color: string }[]>("gh", [
+		"label", "list", "--repo", repository, "--json", "name,color", "--limit", "100",
+	])
+	return labels.map((label) => ({ name: label.name, color: `#${label.color}` }))
+}
+
+export const addPullRequestLabel = async (repository: string, number: number, label: string) => {
+	await run("gh", ["pr", "edit", String(number), "--repo", repository, "--add-label", label])
+}
+
+export const removePullRequestLabel = async (repository: string, number: number, label: string) => {
+	await run("gh", ["pr", "edit", String(number), "--repo", repository, "--remove-label", label])
 }
