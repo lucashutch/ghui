@@ -1,43 +1,71 @@
+import { Context, Effect, Layer, Schema } from "effect"
+
 export interface CommandResult {
 	readonly stdout: string
 	readonly stderr: string
 	readonly exitCode: number
 }
 
+export class CommandError extends Schema.TaggedErrorClass<CommandError>()("CommandError", {
+	command: Schema.String,
+	args: Schema.Array(Schema.String),
+	detail: Schema.String,
+	cause: Schema.Defect,
+}) {}
+
+export class JsonParseError extends Schema.TaggedErrorClass<JsonParseError>()("JsonParseError", {
+	command: Schema.String,
+	args: Schema.Array(Schema.String),
+	stdout: Schema.String,
+	cause: Schema.Defect,
+}) {}
+
 const readStream = async (stream: ReadableStream | null | undefined) => {
 	if (!stream) return ""
 	return Bun.readableStreamToText(stream)
 }
 
-const runProcess = async (command: string, args: readonly string[]): Promise<CommandResult> => {
-	try {
-		const proc = Bun.spawn({
-			cmd: [command, ...args],
-			stdout: "pipe",
-			stderr: "pipe",
-		})
+export class CommandRunner extends Context.Service<CommandRunner, {
+	readonly run: (command: string, args: readonly string[]) => Effect.Effect<CommandResult, CommandError>
+	readonly runJson: <A>(command: string, args: readonly string[]) => Effect.Effect<A, CommandError | JsonParseError>
+}>()("ghui/CommandRunner") {
+	static readonly layer = Layer.effect(
+		CommandRunner,
+		Effect.gen(function*() {
+			const runProcess = Effect.fn("CommandRunner.runProcess")((command: string, args: readonly string[]) =>
+				Effect.tryPromise({
+					async try() {
+						const proc = Bun.spawn({
+							cmd: [command, ...args],
+							stdout: "pipe",
+							stderr: "pipe",
+						})
 
-		const [exitCode, stdout, stderr] = await Promise.all([proc.exited, readStream(proc.stdout), readStream(proc.stderr)])
-		return { stdout, stderr, exitCode }
-	} catch (error) {
-		throw new Error(`Failed to run ${command}: ${String(error)}`)
-	}
-}
+						const [exitCode, stdout, stderr] = await Promise.all([proc.exited, readStream(proc.stdout), readStream(proc.stderr)])
+						return { stdout, stderr, exitCode }
+					},
+					catch: (cause) => new CommandError({ command, args: [...args], detail: `Failed to run ${command}`, cause }),
+				})
+			)
 
-export const run = async (command: string, args: readonly string[]) => {
-	const result = await runProcess(command, args)
-	if (result.exitCode !== 0) {
-		const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`
-		throw new Error(`${command} ${args.join(" ")} failed: ${detail}`)
-	}
-	return result
-}
+			const run = Effect.fn("CommandRunner.run")(function*(command: string, args: readonly string[]) {
+				const result = yield* runProcess(command, args)
+				if (result.exitCode !== 0) {
+					const detail = result.stderr.trim() || result.stdout.trim() || `exit code ${result.exitCode}`
+					return yield* new CommandError({ command, args: [...args], detail, cause: detail })
+				}
+				return result
+			})
 
-export const runJson = async <A>(command: string, args: readonly string[]) => {
-	const result = await run(command, args)
-	try {
-		return JSON.parse(result.stdout) as A
-	} catch (error) {
-		throw new Error(`Could not parse JSON from ${command}: ${String(error)}`)
-	}
+			const runJson = Effect.fn("CommandRunner.runJson")(function*<A>(command: string, args: readonly string[]) {
+				const result = yield* run(command, args)
+				return yield* Effect.try({
+					try: () => JSON.parse(result.stdout) as A,
+					catch: (cause) => new JsonParseError({ command, args: [...args], stdout: result.stdout, cause }),
+				})
+			})
+
+			return CommandRunner.of({ run, runJson })
+		}),
+	)
 }

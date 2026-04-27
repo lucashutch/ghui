@@ -4,9 +4,15 @@
 
 Terminal UI for browsing and acting on your open GitHub pull requests across repositories.
 
-## Install Locally
+## Install
+
+```bash
+npm install -g @kitlangton/ghui
+```
 
 Requires `bun` and an authenticated GitHub CLI (`gh auth login`).
+
+## Install Locally
 
 Clone, install, and link:
 
@@ -22,6 +28,20 @@ Run from anywhere:
 ```bash
 ghui
 ```
+
+## Publish
+
+This package publishes from GitHub Releases using npm Trusted Publishing.
+
+The first npm publish has already created the package. Configure npm Trusted Publishing:
+
+- Package: `@kitlangton/ghui`
+- Publisher: GitHub Actions
+- Owner: `kitlangton`
+- Repository: `ghui`
+- Workflow filename: `publish.yml`
+
+After that, publish by creating a GitHub Release whose tag matches `package.json` version, for example `v0.1.1`.
 
 ## Configuration
 

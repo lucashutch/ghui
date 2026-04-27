@@ -1,14 +1,16 @@
 import { TextAttributes } from "@opentui/core"
-import { useAtom } from "@effect/atom-react"
+import { useAtom, useAtomRefresh, useAtomSet, useAtomValue } from "@effect/atom-react"
 import { useKeyboard, useTerminalDimensions } from "@opentui/react"
+import { Cause, Effect } from "effect"
+import * as AsyncResult from "effect/unstable/reactivity/AsyncResult"
 import * as Atom from "effect/unstable/reactivity/Atom"
 import { Fragment, useEffect, useMemo, useRef } from "react"
 import { config } from "./config.js"
 import type { CheckItem, PullRequestItem, PullRequestLabel } from "./domain.js"
 import { daysOpen, formatRelativeDate, formatShortDate, formatTimestamp } from "./date.js"
-import { addPullRequestLabel, getAuthenticatedUser, listOpenPullRequests as loadOpenPullRequests, listRepoLabels, removePullRequestLabel, toggleDraftStatus } from "./services/GitHubService.js"
+import { GitHubService } from "./services/GitHubService.js"
 
-const toggleDraft = (repository: string, number: number, isDraft: boolean) => toggleDraftStatus(repository, number, isDraft)
+const githubRuntime = Atom.runtime(GitHubService.layer)
 
 const colors = {
 	text: "#ede7da",
@@ -41,10 +43,8 @@ const colors = {
 
 type LoadStatus = "loading" | "ready" | "error"
 
-interface PullRequestState {
-	readonly status: LoadStatus
+interface PullRequestLoad {
 	readonly data: readonly PullRequestItem[]
-	readonly error: string | null
 	readonly fetchedAt: Date | null
 }
 
@@ -58,17 +58,13 @@ interface PreviewLine {
 
 const pullRequestReferencePattern = /(#[0-9]+)/g
 
-const initialPullRequestState: PullRequestState = {
-	status: "loading",
-	data: [],
-	error: null,
-	fetchedAt: null,
-}
-
-const pullRequestStateAtom = Atom.make(initialPullRequestState).pipe(Atom.keepAlive)
+const pullRequestsAtom = githubRuntime.atom(
+	GitHubService.use((github) =>
+		github.listOpenPullRequests().pipe(Effect.map((data): PullRequestLoad => ({ data, fetchedAt: new Date() })))
+	),
+).pipe(Atom.keepAlive)
 const selectedIndexAtom = Atom.make(0).pipe(Atom.keepAlive)
 const noticeAtom = Atom.make<string | null>(null).pipe(Atom.keepAlive)
-const refreshNonceAtom = Atom.make(0).pipe(Atom.keepAlive)
 const filterQueryAtom = Atom.make("").pipe(Atom.keepAlive)
 const filterDraftAtom = Atom.make("").pipe(Atom.keepAlive)
 const filterModeAtom = Atom.make(false).pipe(Atom.keepAlive)
@@ -81,6 +77,7 @@ const groupIconIndexAtom = Atom.make(0).pipe(Atom.keepAlive)
 
 interface LabelModalState {
 	readonly open: boolean
+	readonly repository: string | null
 	readonly query: string
 	readonly selectedIndex: number
 	readonly availableLabels: readonly PullRequestLabel[]
@@ -89,6 +86,7 @@ interface LabelModalState {
 
 const initialLabelModalState: LabelModalState = {
 	open: false,
+	repository: null,
 	query: "",
 	selectedIndex: 0,
 	availableLabels: [],
@@ -96,7 +94,26 @@ const initialLabelModalState: LabelModalState = {
 }
 
 const labelModalAtom = Atom.make(initialLabelModalState).pipe(Atom.keepAlive)
-const usernameAtom = Atom.make<string | null>(null).pipe(Atom.keepAlive)
+const labelCacheAtom = Atom.make<Record<string, readonly PullRequestLabel[]>>({}).pipe(Atom.keepAlive)
+const pullRequestOverridesAtom = Atom.make<Record<string, PullRequestItem>>({}).pipe(Atom.keepAlive)
+const usernameAtom = githubRuntime.atom(
+	config.author === "@me"
+		? GitHubService.use((github) => github.getAuthenticatedUser())
+		: Effect.succeed(config.author.replace(/^@/, "")),
+).pipe(Atom.keepAlive)
+
+const listRepoLabelsAtom = githubRuntime.fn<string>()((repository) =>
+	GitHubService.use((github) => github.listRepoLabels(repository))
+)
+const addPullRequestLabelAtom = githubRuntime.fn<{ readonly repository: string; readonly number: number; readonly label: string }>()((input) =>
+	GitHubService.use((github) => github.addPullRequestLabel(input.repository, input.number, input.label))
+)
+const removePullRequestLabelAtom = githubRuntime.fn<{ readonly repository: string; readonly number: number; readonly label: string }>()((input) =>
+	GitHubService.use((github) => github.removePullRequestLabel(input.repository, input.number, input.label))
+)
+const toggleDraftAtom = githubRuntime.fn<{ readonly repository: string; readonly number: number; readonly isDraft: boolean }>()((input) =>
+	GitHubService.use((github) => github.toggleDraftStatus(input.repository, input.number, input.isDraft))
+)
 
 const shortRepoName = (repository: string) => repository.split("/")[1] ?? repository
 
@@ -233,10 +250,6 @@ const wrapPreviewSegments = (segments: PreviewLine["segments"], width: number, i
 	return lines
 }
 
-// @ts-ignore kept for potential future use
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
-const hasLabel = (pullRequest: PullRequestItem, label: string) => pullRequest.labels.some((current) => current.name.toLowerCase() === label.toLowerCase())
-
 const fallbackLabelColor = (name: string) => {
 	let hash = 0
 	for (const char of name) {
@@ -245,6 +258,8 @@ const fallbackLabelColor = (name: string) => {
 	const hue = hash % 360
 	return `hsl(${hue} 55% 35%)`
 }
+
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
 const labelColor = (label: PullRequestLabel) => label.color ?? fallbackLabelColor(label.name)
 
@@ -806,8 +821,13 @@ const LabelModal = ({
 	const filtered = state.availableLabels.filter((label) =>
 		state.query.length === 0 || label.name.toLowerCase().includes(state.query.toLowerCase()),
 	)
-	const maxVisible = modalHeight - 5
-	const visibleLabels = filtered.slice(0, maxVisible)
+	const maxVisible = Math.max(1, modalHeight - 5)
+	const selectedIndex = filtered.length === 0 ? 0 : Math.max(0, Math.min(state.selectedIndex, filtered.length - 1))
+	const scrollStart = Math.min(
+		Math.max(0, filtered.length - maxVisible),
+		Math.max(0, selectedIndex - maxVisible + 1),
+	)
+	const visibleLabels = filtered.slice(scrollStart, scrollStart + maxVisible)
 
 	return (
 		<box
@@ -822,6 +842,7 @@ const LabelModal = ({
 			<box height={1} paddingLeft={1} paddingRight={1}>
 				<TextLine>
 					<span fg={colors.accent} attributes={TextAttributes.BOLD}>Labels</span>
+					{state.repository ? <span fg={colors.muted}> {state.repository}</span> : null}
 				</TextLine>
 			</box>
 			<box height={1} paddingLeft={1} paddingRight={1}>
@@ -840,8 +861,9 @@ const LabelModal = ({
 					<PlainLine text={state.query.length > 0 ? "No matching labels." : "No labels found."} fg={colors.muted} />
 				) : (
 					visibleLabels.map((label, index) => {
+						const actualIndex = scrollStart + index
 						const isActive = currentNames.has(label.name.toLowerCase())
-						const isSelected = index === state.selectedIndex
+						const isSelected = actualIndex === selectedIndex
 						return (
 							<box key={label.name} height={1}>
 								<TextLine bg={isSelected ? colors.selectedBg : undefined}>
@@ -861,6 +883,7 @@ const LabelModal = ({
 					<span fg={colors.muted}> toggle  </span>
 					<span fg={colors.count}>esc</span>
 					<span fg={colors.muted}> close</span>
+					{filtered.length > maxVisible ? <span fg={colors.muted}>  {selectedIndex + 1}/{filtered.length}</span> : null}
 				</TextLine>
 			</box>
 		</box>
@@ -869,10 +892,10 @@ const LabelModal = ({
 
 export const App = () => {
 	const { width, height } = useTerminalDimensions()
-	const [pullRequestState, setPullRequestState] = useAtom(pullRequestStateAtom)
+	const pullRequestResult = useAtomValue(pullRequestsAtom)
+	const refreshPullRequestsAtom = useAtomRefresh(pullRequestsAtom)
 	const [selectedIndex, setSelectedIndex] = useAtom(selectedIndexAtom)
 	const [notice, setNotice] = useAtom(noticeAtom)
-	const [refreshNonce, setRefreshNonce] = useAtom(refreshNonceAtom)
 	const [filterQuery, setFilterQuery] = useAtom(filterQueryAtom)
 	const [filterDraft, setFilterDraft] = useAtom(filterDraftAtom)
 	const [filterMode, setFilterMode] = useAtom(filterModeAtom)
@@ -880,7 +903,13 @@ export const App = () => {
 	const [detailFullView, setDetailFullView] = useAtom(detailFullViewAtom)
 	const [_detailScrollOffset, setDetailScrollOffset] = useAtom(detailScrollOffsetAtom)
 	const [labelModal, setLabelModal] = useAtom(labelModalAtom)
-	const [username, setUsername] = useAtom(usernameAtom)
+	const [labelCache, setLabelCache] = useAtom(labelCacheAtom)
+	const [pullRequestOverrides, setPullRequestOverrides] = useAtom(pullRequestOverridesAtom)
+	const usernameResult = useAtomValue(usernameAtom)
+	const loadRepoLabels = useAtomSet(listRepoLabelsAtom, { mode: "promise" })
+	const addPullRequestLabel = useAtomSet(addPullRequestLabelAtom, { mode: "promise" })
+	const removePullRequestLabel = useAtomSet(removePullRequestLabelAtom, { mode: "promise" })
+	const toggleDraftStatus = useAtomSet(toggleDraftAtom, { mode: "promise" })
 	const [groupIconIndex, setGroupIconIndex] = useAtom(groupIconIndexAtom)
 	const groupIcon = GROUP_ICONS[groupIconIndex % GROUP_ICONS.length]!
 	const contentWidth = Math.max(60, width ?? 100)
@@ -917,65 +946,20 @@ export const App = () => {
 		}
 	}, [])
 
-	useEffect(() => {
-		let cancelled = false
-		if (config.author !== "@me") {
-			setUsername(config.author.replace(/^@/, ""))
-			return () => {
-				cancelled = true
-			}
-		}
-
-		void getAuthenticatedUser()
-			.then((login) => {
-				if (!cancelled) setUsername(login)
-			})
-			.catch(() => {
-				if (!cancelled) setUsername(null)
-			})
-
-		return () => {
-			cancelled = true
-		}
-	}, [setUsername])
-
-	useEffect(() => {
-		let cancelled = false
-
-		setPullRequestState((current) => ({
-			...current,
-			status: current.fetchedAt === null ? "loading" : "ready",
-			error: null,
-		}))
-
-		loadOpenPullRequests()
-			.then((pullRequests) => {
-				if (cancelled) return
-				setPullRequestState({
-					status: "ready",
-					data: pullRequests,
-					error: null,
-					fetchedAt: new Date(),
-				})
-			})
-			.catch((error) => {
-				if (cancelled) return
-				setPullRequestState((current) => ({
-					...current,
-					status: "error",
-					error: error instanceof Error ? error.message : String(error),
-				}))
-			})
-
-		return () => {
-			cancelled = true
-		}
-	}, [refreshNonce])
+	const pullRequestLoad = AsyncResult.getOrElse(pullRequestResult, () => null)
+	const pullRequests = pullRequestLoad?.data.map((pullRequest) => pullRequestOverrides[pullRequest.url] ?? pullRequest) ?? []
+	const pullRequestStatus: LoadStatus = pullRequestResult.waiting && pullRequestLoad === null
+		? "loading"
+		: AsyncResult.isFailure(pullRequestResult)
+			? "error"
+			: "ready"
+	const pullRequestError = AsyncResult.isFailure(pullRequestResult) ? errorMessage(Cause.squash(pullRequestResult.cause)) : null
+	const username = AsyncResult.isSuccess(usernameResult) ? usernameResult.value : null
 
 	const effectiveFilterQuery = (filterMode ? filterDraft : filterQuery).trim().toLowerCase()
 	const visibleFilterText = filterMode ? filterDraft : filterQuery
 
-	const filteredPullRequests = pullRequestState.data.filter((pullRequest) => {
+	const filteredPullRequests = pullRequests.filter((pullRequest) => {
 		const query = effectiveFilterQuery
 		if (query.length === 0) return true
 		return [pullRequest.title, pullRequest.repository, String(pullRequest.number)]
@@ -1001,9 +985,9 @@ export const App = () => {
 		}
 		return 0
 	}
-	const summaryRight = pullRequestState.fetchedAt
-		? `updated ${formatShortDate(pullRequestState.fetchedAt)} ${formatTimestamp(pullRequestState.fetchedAt)}`
-		: pullRequestState.status === "loading"
+	const summaryRight = pullRequestLoad?.fetchedAt
+		? `updated ${formatShortDate(pullRequestLoad.fetchedAt)} ${formatTimestamp(pullRequestLoad.fetchedAt)}`
+		: pullRequestStatus === "loading"
 			? "loading pull requests..."
 			: ""
 	const headerLeft = username ? `GHUI  ${username}` : "GHUI"
@@ -1014,13 +998,13 @@ export const App = () => {
 		if (index >= 0) setSelectedIndex(index)
 	}
 	const updatePullRequest = (url: string, transform: (pullRequest: PullRequestItem) => PullRequestItem) => {
-		setPullRequestState((current) => ({
-			...current,
-			data: current.data.map((pullRequest) => (pullRequest.url === url ? transform(pullRequest) : pullRequest)),
-		}))
+		const pullRequest = pullRequests.find((item) => item.url === url)
+		if (!pullRequest) return
+		setPullRequestOverrides((current) => ({ ...current, [url]: transform(pullRequest) }))
 	}
 	const refreshPullRequests = (message?: string) => {
-		setRefreshNonce((current) => current + 1)
+		setPullRequestOverrides({})
+		refreshPullRequestsAtom()
 		if (message) flashNotice(message)
 	}
 
@@ -1045,13 +1029,28 @@ export const App = () => {
 
 	const openLabelModal = () => {
 		if (!selectedPullRequest) return
-		setLabelModal((current) => ({ ...current, open: true, query: "", selectedIndex: 0, loading: true }))
-		void listRepoLabels(selectedPullRequest.repository)
+		const repository = selectedPullRequest.repository
+		const cachedLabels = labelCache[repository]
+		if (cachedLabels) {
+			setLabelModal({
+				open: true,
+				repository,
+				query: "",
+				selectedIndex: 0,
+				availableLabels: cachedLabels,
+				loading: false,
+			})
+			return
+		}
+
+		setLabelModal((current) => ({ ...current, open: true, repository, query: "", selectedIndex: 0, availableLabels: [], loading: true }))
+		void loadRepoLabels(repository)
 			.then((labels) => {
-				setLabelModal((current) => ({ ...current, availableLabels: labels, loading: false }))
+				setLabelCache((current) => ({ ...current, [repository]: labels }))
+				setLabelModal((current) => current.repository === repository ? { ...current, availableLabels: labels, loading: false } : current)
 			})
 			.catch((error) => {
-				setLabelModal((current) => ({ ...current, loading: false }))
+				setLabelModal((current) => current.repository === repository ? { ...current, loading: false } : current)
 				flashNotice(error instanceof Error ? error.message : String(error))
 			})
 	}
@@ -1072,7 +1071,7 @@ export const App = () => {
 				...pr,
 				labels: pr.labels.filter((l) => l.name.toLowerCase() !== label.name.toLowerCase()),
 			}))
-			void removePullRequestLabel(selectedPullRequest.repository, selectedPullRequest.number, label.name)
+			void removePullRequestLabel({ repository: selectedPullRequest.repository, number: selectedPullRequest.number, label: label.name })
 				.then(() => flashNotice(`Removed ${label.name} from #${selectedPullRequest.number}`))
 				.catch((error) => {
 					updatePullRequest(selectedPullRequest.url, () => previousPullRequest)
@@ -1083,7 +1082,7 @@ export const App = () => {
 				...pr,
 				labels: [...pr.labels, { name: label.name, color: label.color }],
 			}))
-			void addPullRequestLabel(selectedPullRequest.repository, selectedPullRequest.number, label.name)
+			void addPullRequestLabel({ repository: selectedPullRequest.repository, number: selectedPullRequest.number, label: label.name })
 				.then(() => flashNotice(`Added ${label.name} to #${selectedPullRequest.number}`))
 				.catch((error) => {
 					updatePullRequest(selectedPullRequest.url, () => previousPullRequest)
@@ -1127,7 +1126,7 @@ export const App = () => {
 				)
 				setLabelModal((current) => ({
 					...current,
-					selectedIndex: Math.min(filtered.length - 1, current.selectedIndex + 1),
+					selectedIndex: Math.min(Math.max(0, filtered.length - 1), current.selectedIndex + 1),
 				}))
 				return
 			}
@@ -1345,7 +1344,7 @@ export const App = () => {
 				...pullRequest,
 				reviewStatus: nextReviewStatus,
 			}))
-			void toggleDraft(selectedPullRequest.repository, selectedPullRequest.number, selectedPullRequest.reviewStatus === "draft")
+			void toggleDraftStatus({ repository: selectedPullRequest.repository, number: selectedPullRequest.number, isDraft: selectedPullRequest.reviewStatus === "draft" })
 				.then(() => {
 					flashNotice(selectedPullRequest.reviewStatus === "draft" ? `Marked #${selectedPullRequest.number} ready` : `Marked #${selectedPullRequest.number} draft`)
 				})
@@ -1372,8 +1371,8 @@ export const App = () => {
 	const prListProps = {
 		groups: visibleGroups,
 		selectedUrl: selectedPullRequest?.url ?? null,
-		status: pullRequestState.status,
-		error: pullRequestState.error,
+		status: pullRequestStatus,
+		error: pullRequestError,
 		filterText: visibleFilterText,
 		showFilterBar: filterMode || filterQuery.length > 0,
 		isFilterEditing: filterMode,

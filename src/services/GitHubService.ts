@@ -1,6 +1,7 @@
+import { Context, Effect, Layer } from "effect"
 import { config } from "../config.js"
-import type { CheckItem, PullRequestItem, PullRequestLabel } from "../domain.js"
-import { run, runJson } from "./CommandRunner.js"
+import type { CheckItem, PullRequestItem } from "../domain.js"
+import { CommandRunner, type CommandError, type JsonParseError } from "./CommandRunner.js"
 
 interface GitHubListPullRequest {
 	readonly number: number
@@ -153,41 +154,72 @@ const searchOpenArgs = (author: string) => [
 	searchJsonFields,
 ] as const
 
-export const listOpenPullRequests = async (): Promise<readonly PullRequestItem[]> => {
-	const searchResults = await runJson<readonly GitHubSearchPullRequest[]>("gh", [...searchOpenArgs(config.author)])
-	const pullRequests = await Promise.all(
-		searchResults.map(async (searchResult) => {
-			const repository = searchResult.repository.nameWithOwner
-			const pullRequest = await runJson<GitHubListPullRequest>("gh", [
-				"pr", "view", String(searchResult.number), "--repo", repository, "--json", detailJsonFields,
-			])
-			return parsePullRequest(repository, pullRequest)
+type GitHubError = CommandError | JsonParseError
+
+export class GitHubService extends Context.Service<GitHubService, {
+	readonly listOpenPullRequests: () => Effect.Effect<readonly PullRequestItem[], GitHubError>
+	readonly getAuthenticatedUser: () => Effect.Effect<string, GitHubError>
+	readonly toggleDraftStatus: (repository: string, number: number, isDraft: boolean) => Effect.Effect<void, CommandError>
+	readonly listRepoLabels: (repository: string) => Effect.Effect<readonly { readonly name: string; readonly color: string | null }[], GitHubError>
+	readonly addPullRequestLabel: (repository: string, number: number, label: string) => Effect.Effect<void, CommandError>
+	readonly removePullRequestLabel: (repository: string, number: number, label: string) => Effect.Effect<void, CommandError>
+}>()("ghui/GitHubService") {
+	static readonly layerNoDeps = Layer.effect(
+		GitHubService,
+		Effect.gen(function*() {
+			const command = yield* CommandRunner
+
+			const listOpenPullRequests = Effect.fn("GitHubService.listOpenPullRequests")(function*() {
+				const searchResults = yield* command.runJson<readonly GitHubSearchPullRequest[]>("gh", [...searchOpenArgs(config.author)])
+				const pullRequests = yield* Effect.forEach(
+					searchResults,
+					Effect.fn("GitHubService.loadPullRequestDetail")(function*(searchResult) {
+						const repository = searchResult.repository.nameWithOwner
+						const pullRequest = yield* command.runJson<GitHubListPullRequest>("gh", [
+							"pr", "view", String(searchResult.number), "--repo", repository, "--json", detailJsonFields,
+						])
+						return parsePullRequest(repository, pullRequest)
+					}),
+					{ concurrency: 8 },
+				)
+
+				return pullRequests.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
+			})
+
+			const getAuthenticatedUser = Effect.fn("GitHubService.getAuthenticatedUser")(function*() {
+				const viewer = yield* command.runJson<GitHubViewer>("gh", ["api", "user"])
+				return viewer.login
+			})
+
+			const toggleDraftStatus = Effect.fn("GitHubService.toggleDraftStatus")(function*(repository: string, number: number, isDraft: boolean) {
+				yield* command.run("gh", ["pr", "ready", String(number), "--repo", repository, ...(isDraft ? [] : ["--undo"])])
+			})
+
+			const listRepoLabels = Effect.fn("GitHubService.listRepoLabels")(function*(repository: string) {
+				const labels = yield* command.runJson<readonly { name: string; color: string }[]>("gh", [
+					"label", "list", "--repo", repository, "--json", "name,color", "--limit", "100",
+				])
+				return labels.map((label) => ({ name: label.name, color: `#${label.color}` }))
+			})
+
+			const addPullRequestLabel = Effect.fn("GitHubService.addPullRequestLabel")(function*(repository: string, number: number, label: string) {
+				yield* command.run("gh", ["pr", "edit", String(number), "--repo", repository, "--add-label", label])
+			})
+
+			const removePullRequestLabel = Effect.fn("GitHubService.removePullRequestLabel")(function*(repository: string, number: number, label: string) {
+				yield* command.run("gh", ["pr", "edit", String(number), "--repo", repository, "--remove-label", label])
+			})
+
+			return GitHubService.of({
+				listOpenPullRequests,
+				getAuthenticatedUser,
+				toggleDraftStatus,
+				listRepoLabels,
+				addPullRequestLabel,
+				removePullRequestLabel,
+			})
 		}),
 	)
 
-	return pullRequests.sort((left, right) => right.createdAt.getTime() - left.createdAt.getTime())
-}
-
-export const getAuthenticatedUser = async () => {
-	const viewer = await runJson<GitHubViewer>("gh", ["api", "user"])
-	return viewer.login
-}
-
-export const toggleDraftStatus = async (repository: string, number: number, isDraft: boolean) => {
-	await run("gh", ["pr", "ready", String(number), "--repo", repository, ...(isDraft ? [] : ["--undo"])])
-}
-
-export const listRepoLabels = async (repository: string): Promise<readonly PullRequestLabel[]> => {
-	const labels = await runJson<readonly { name: string; color: string }[]>("gh", [
-		"label", "list", "--repo", repository, "--json", "name,color", "--limit", "100",
-	])
-	return labels.map((label) => ({ name: label.name, color: `#${label.color}` }))
-}
-
-export const addPullRequestLabel = async (repository: string, number: number, label: string) => {
-	await run("gh", ["pr", "edit", String(number), "--repo", repository, "--add-label", label])
-}
-
-export const removePullRequestLabel = async (repository: string, number: number, label: string) => {
-	await run("gh", ["pr", "edit", String(number), "--repo", repository, "--remove-label", label])
+	static readonly layer = GitHubService.layerNoDeps.pipe(Layer.provide(CommandRunner.layer))
 }
