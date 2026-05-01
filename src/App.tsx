@@ -118,6 +118,64 @@ const deleteLastWord = (value: string) => value.replace(/\s*\S+\s*$/, "")
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error)
 
+const clipboardCommands = (): readonly (readonly string[])[] => {
+	if (process.platform === "darwin") return [["pbcopy"]]
+	if (process.platform === "linux") {
+		return [
+			...(process.env.WAYLAND_DISPLAY ? [["wl-copy"]] : []),
+			["xclip", "-selection", "clipboard"],
+			["xsel", "--clipboard", "--input"],
+		]
+	}
+	return []
+}
+
+const copyToClipboard = async (text: string) => {
+	const commands = clipboardCommands()
+	let lastError = ""
+
+	for (const command of commands) {
+		let proc: Bun.Subprocess<"pipe", "ignore", "pipe">
+		try {
+			proc = Bun.spawn({
+				cmd: [...command],
+				stdin: "pipe",
+				stdout: "ignore",
+				stderr: "pipe",
+			})
+		} catch (error) {
+			lastError = errorMessage(error)
+			continue
+		}
+
+		proc.stdin.write(text)
+		proc.stdin.end()
+
+		const exitCode = await proc.exited
+		if (exitCode === 0) return
+
+		const stderr = await Bun.readableStreamToText(proc.stderr)
+		lastError = stderr.trim()
+	}
+
+	const installHint = process.platform === "linux" ? " Install wl-clipboard, xclip, or xsel." : ""
+	throw new Error(lastError || `Clipboard is not available.${installHint}`)
+}
+
+const openPullRequestInBrowser = async (pullRequest: PullRequestItem) => {
+	const proc = Bun.spawn({
+		cmd: ["gh", "pr", "view", String(pullRequest.number), "--repo", pullRequest.repository, "--web"],
+		stdout: "ignore",
+		stderr: "pipe",
+	})
+
+	const exitCode = await proc.exited
+	if (exitCode === 0) return
+
+	const stderr = await Bun.readableStreamToText(proc.stderr)
+	throw new Error(stderr.trim() || "Could not open PR in browser")
+}
+
 const copyPullRequestMetadata = async (pullRequest: PullRequestItem) => {
 	const lines = [
 		pullRequest.title,
@@ -133,25 +191,7 @@ const copyPullRequestMetadata = async (pullRequest: PullRequestItem) => {
 		lines.push(pullRequest.checkSummary)
 	}
 
-	const proc = Bun.spawn({
-		cmd: ["pbcopy"],
-		stdin: "pipe",
-		stdout: "ignore",
-		stderr: "pipe",
-	})
-
-	if (!proc.stdin) {
-		throw new Error("Clipboard is not available")
-	}
-
-	proc.stdin.write(lines.join("\n"))
-	proc.stdin.end()
-
-	const exitCode = await proc.exited
-	if (exitCode !== 0) {
-		const stderr = await Bun.readableStreamToText(proc.stderr)
-		throw new Error(stderr.trim() || "Could not copy PR metadata")
-	}
+	await copyToClipboard(lines.join("\n"))
 }
 
 const isShiftG = (key: { readonly name: string; readonly shift?: boolean }) => key.name === "G" || key.name === "g" && key.shift
@@ -495,6 +535,12 @@ export const App = () => {
 		loadPullRequestDiff(selectedPullRequest)
 	}
 
+	const openSelectedPullRequestInBrowser = (pullRequest: PullRequestItem) => {
+		void openPullRequestInBrowser(pullRequest)
+			.then(() => flashNotice(`Opened #${pullRequest.number} in browser`))
+			.catch((error) => flashNotice(errorMessage(error)))
+	}
+
 	const openLabelModal = () => {
 		if (!selectedPullRequest) return
 		setMergeModal(initialMergeModalState)
@@ -803,8 +849,7 @@ export const App = () => {
 				return
 			}
 			if (key.name === "o" && selectedPullRequest) {
-				void Bun.spawn({ cmd: ["open", selectedPullRequest.url], stdout: "ignore", stderr: "ignore" })
-				flashNotice(`Opened #${selectedPullRequest.number} in browser`)
+				openSelectedPullRequestInBrowser(selectedPullRequest)
 				return
 			}
 			return
@@ -881,8 +926,7 @@ export const App = () => {
 				return
 			}
 			if (key.name === "o" && selectedPullRequest) {
-				void Bun.spawn({ cmd: ["open", selectedPullRequest.url], stdout: "ignore", stderr: "ignore" })
-				flashNotice(`Opened #${selectedPullRequest.number} in browser`)
+				openSelectedPullRequestInBrowser(selectedPullRequest)
 				return
 			}
 			if (key.name === "y" && selectedPullRequest) {
@@ -1037,8 +1081,7 @@ export const App = () => {
 			return
 		}
 		if (key.name === "o" && selectedPullRequest) {
-			void Bun.spawn({ cmd: ["open", selectedPullRequest.url], stdout: "ignore", stderr: "ignore" })
-			flashNotice(`Opened #${selectedPullRequest.number} in browser`)
+			openSelectedPullRequestInBrowser(selectedPullRequest)
 			return
 		}
 		if ((key.name === "s" || key.name === "S") && selectedPullRequest) {
