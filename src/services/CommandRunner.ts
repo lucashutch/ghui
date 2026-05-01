@@ -28,6 +28,8 @@ const readStream = async (stream: ReadableStream | null | undefined) => {
 export class CommandRunner extends Context.Service<CommandRunner, {
 	readonly run: (command: string, args: readonly string[]) => Effect.Effect<CommandResult, CommandError>
 	readonly runJson: <A>(command: string, args: readonly string[]) => Effect.Effect<A, CommandError | JsonParseError>
+	readonly runSchema: <S extends Schema.Top>(schema: S, command: string, args: readonly string[]) =>
+		Effect.Effect<S["Type"], CommandError | JsonParseError | Schema.SchemaError, S["DecodingServices"]>
 }>()("ghui/CommandRunner") {
 	static readonly layer = Layer.effect(
 		CommandRunner,
@@ -70,7 +72,12 @@ export class CommandRunner extends Context.Service<CommandRunner, {
 				})
 			})
 
-			return CommandRunner.of({ run, runJson })
+			const runSchema = Effect.fn("CommandRunner.runSchema")(function*<S extends Schema.Top>(schema: S, command: string, args: readonly string[]) {
+				const value = yield* runJson<unknown>(command, args)
+				return yield* Schema.decodeUnknownEffect(schema)(value)
+			})
+
+			return CommandRunner.of({ run, runJson, runSchema })
 		}),
 	)
 }

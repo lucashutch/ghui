@@ -16,5 +16,6 @@ coverage/
 
 # editor and OS files
 .DS_Store
+.claude/
 .idea/
 .vscode/

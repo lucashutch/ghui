@@ -298,11 +298,13 @@ export const getDetailsPaneHeight = ({
 
 export const DetailHeader = ({
 	pullRequest,
+	viewerUsername,
 	contentWidth,
 	paneWidth,
 	showChecks = false,
 }: {
 	pullRequest: PullRequestItem
+	viewerUsername: string | null
 	contentWidth: number
 	paneWidth: number
 	showChecks?: boolean
@@ -319,34 +321,31 @@ export const DetailHeader = ({
 		: "no labels".length
 	const showStats = contentWidth - labelsWidth - statsText.length >= 2
 	const statsGap = Math.max(2, contentWidth - labelsWidth - statsText.length)
+	const opened = formatRelativeDate(pullRequest.createdAt)
+	const repo = shortRepoName(pullRequest.repository)
+	const author = viewerUsername && pullRequest.author !== viewerUsername ? ` by ${pullRequest.author}` : ""
+	const number = String(pullRequest.number)
+	const review = reviewLabel(pullRequest)
+	const checks = pullRequest.checkSummary?.replace(/^checks\s+/, "")
+	const statusParts = [review, checks].filter((part): part is string => Boolean(part))
+	const rightSide = statusParts.length > 0 ? `${statusParts.join(" ")} ${opened}` : opened
+	const leftWidth = 1 + number.length + 1 + repo.length + author.length
+	const gap = Math.max(2, contentWidth - leftWidth - rightSide.length)
 
 	return (
 		<>
 			<box height={1} paddingLeft={1} paddingRight={1}>
-			{(() => {
-				const opened = formatRelativeDate(pullRequest.createdAt)
-				const repo = shortRepoName(pullRequest.repository)
-				const number = String(pullRequest.number)
-				const review = reviewLabel(pullRequest)
-				const checks = pullRequest.checkSummary?.replace(/^checks\s+/, "")
-				const statusParts = [review, checks].filter((part): part is string => Boolean(part))
-				const rightSide = statusParts.length > 0 ? `${statusParts.join(" ")} ${opened}` : opened
-				const leftWidth = 1 + number.length + 1 + repo.length
-				const gap = Math.max(2, contentWidth - leftWidth - rightSide.length)
-
-				return (
-					<TextLine>
-						<span fg={colors.count}>#{number}</span>
-						<span fg={colors.muted}> {repo}</span>
-						<span fg={colors.muted}>{" ".repeat(gap)}</span>
-						{review ? <span fg={statusColor(pullRequest.reviewStatus)}>{review}</span> : null}
-						{review && checks ? <span fg={colors.muted}> </span> : null}
-						{checks ? <span fg={statusColor(pullRequest.checkStatus)}>{checks}</span> : null}
-						{statusParts.length > 0 ? <span fg={colors.muted}> </span> : null}
-						<span fg={colors.muted}>{opened}</span>
-					</TextLine>
-				)
-			})()}
+				<TextLine>
+					<span fg={colors.count}>#{number}</span>
+					<span fg={colors.muted}> {repo}</span>
+					{author ? <span fg={colors.muted}>{author}</span> : null}
+					<span fg={colors.muted}>{" ".repeat(gap)}</span>
+					{review ? <span fg={statusColor(pullRequest.reviewStatus)}>{review}</span> : null}
+					{review && checks ? <span fg={colors.muted}> </span> : null}
+					{checks ? <span fg={statusColor(pullRequest.checkStatus)}>{checks}</span> : null}
+					{statusParts.length > 0 ? <span fg={colors.muted}> </span> : null}
+					<span fg={colors.muted}>{opened}</span>
+				</TextLine>
 			</box>
 			<box height={wrappedTitle.length} flexDirection="column" paddingLeft={1} paddingRight={1}>
 				{wrappedTitle.map((line, index) => (
@@ -482,6 +481,7 @@ export const LoadingPane = ({ content, width, height }: { content: DetailPlaceho
 
 export const DetailsPane = ({
 	pullRequest,
+	viewerUsername,
 	contentWidth,
 	bodyLines = DETAIL_BODY_LINES,
 	paneWidth = contentWidth + 2,
@@ -491,6 +491,7 @@ export const DetailsPane = ({
 	themeId,
 }: {
 	pullRequest: PullRequestItem | null
+	viewerUsername: string | null
 	contentWidth: number
 	bodyLines?: number
 	paneWidth?: number
@@ -505,7 +506,7 @@ export const DetailsPane = ({
 		<box flexDirection="column" height={contentHeight}>
 			{pullRequest ? (
 				<>
-					<DetailHeader pullRequest={pullRequest} contentWidth={contentWidth} paneWidth={paneWidth} showChecks={showChecks} />
+					<DetailHeader pullRequest={pullRequest} viewerUsername={viewerUsername} contentWidth={contentWidth} paneWidth={paneWidth} showChecks={showChecks} />
 					<DetailBody pullRequest={pullRequest} contentWidth={contentWidth} bodyLines={bodyLines} loadingIndicator={loadingIndicator} themeId={themeId} />
 				</>
 			) : (

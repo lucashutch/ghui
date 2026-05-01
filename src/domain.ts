@@ -1,5 +1,26 @@
 export type PullRequestState = "open" | "closed" | "merged"
 
+export const pullRequestQueueModes = ["authored", "review", "assigned", "mentioned"] as const
+
+export type PullRequestQueueMode = typeof pullRequestQueueModes[number]
+
+export const pullRequestQueueLabels = {
+	authored: "authored",
+	review: "review requested",
+	assigned: "assigned",
+	mentioned: "mentioned",
+} as const satisfies Record<PullRequestQueueMode, string>
+
+export const pullRequestQueueSearchQualifier = (mode: PullRequestQueueMode, author: string) => {
+	const qualifiers = {
+		authored: `author:${author}`,
+		review: "review-requested:@me",
+		assigned: "assignee:@me",
+		mentioned: "mentions:@me",
+	} as const satisfies Record<PullRequestQueueMode, string>
+	return qualifiers[mode]
+}
+
 export type CheckConclusion = "success" | "failure" | "neutral" | "skipped" | "cancelled" | "timed_out"
 
 export interface CheckItem {
@@ -13,8 +34,33 @@ export interface PullRequestLabel {
 	readonly color: string | null
 }
 
+export type DiffCommentSide = "LEFT" | "RIGHT"
+
+export interface CreatePullRequestCommentInput {
+	readonly repository: string
+	readonly number: number
+	readonly commitId: string
+	readonly path: string
+	readonly line: number
+	readonly side: DiffCommentSide
+	readonly body: string
+}
+
+export interface PullRequestReviewComment {
+	readonly id: string
+	readonly path: string
+	readonly line: number
+	readonly side: DiffCommentSide
+	readonly author: string
+	readonly body: string
+	readonly createdAt: Date | null
+	readonly url: string | null
+}
+
 export interface PullRequestItem {
 	readonly repository: string
+	readonly author: string
+	readonly headRefOid: string
 	readonly number: number
 	readonly title: string
 	readonly body: string

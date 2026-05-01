@@ -2,7 +2,7 @@
 
 Terminal UI for keeping up with your open GitHub pull requests across repositories.
 
-`ghui` gives you one keyboard-driven place to review PR details, inspect diffs, manage labels, toggle draft state, merge, open PRs in GitHub, and copy PR metadata without leaving the terminal.
+`ghui` gives you one keyboard-driven place to review PR details, inspect diffs, leave diff comments, manage labels, toggle draft state, merge, open PRs in GitHub, and copy PR metadata without leaving the terminal.
 
 ## Install
 
@@ -53,11 +53,18 @@ You can also copy `.env.example` to `.env` and edit the values locally.
 - `k` / `j`: move selection
 - `gg` / `G`: jump to first or last pull request
 - `ctrl-u` / `ctrl-d`: page up or down
+- `tab` / `shift-tab`: switch PR queue
 - `/`: filter
-- `enter`: expand details
-- `esc`: return from expanded details or close modal
+- `enter`: expand details; normal PR actions still work while details are expanded
+- `esc`: return from expanded details, leave diff/comment mode, or close modal
 - `r`: refresh
-- `d`: view diff
+- `d`: view stacked diff for all changed files
+- `c`: enter or exit diff comment mode while viewing a diff
+- `up` / `down` / `pageup` / `pagedown`: move comment target while in diff comment mode
+- `enter`: open a commented diff line, or start a comment on an uncommented line
+- `a`: add a comment while in diff comment mode
+- `left` / `right`: choose the deleted or added side while in split diff comment mode
+- `[` / `]`: switch files while viewing or commenting on a diff
 - `s`: toggle draft or ready-for-review state
 - `m`: merge
 - `x`: close with confirmation

@@ -11,6 +11,7 @@ export const FooterHints = ({
 	showFilterClear,
 	detailFullView,
 	diffFullView,
+	diffCommentMode,
 	hasSelection,
 	canCloseSelection,
 	hasError,
@@ -22,6 +23,7 @@ export const FooterHints = ({
 	showFilterClear: boolean
 	detailFullView: boolean
 	diffFullView: boolean
+	diffCommentMode: boolean
 	hasSelection: boolean
 	canCloseSelection: boolean
 	hasError: boolean
@@ -49,6 +51,28 @@ export const FooterHints = ({
 	}
 
 	if (diffFullView) {
+		if (diffCommentMode) {
+			return (
+				<TextLine>
+					<span fg={colors.count}>↑↓</span>
+					<span fg={colors.muted}> line  </span>
+					<span fg={colors.count}>pgup/pgdn</span>
+					<span fg={colors.muted}> jump  </span>
+					<span fg={colors.count}>←→</span>
+					<span fg={colors.muted}> side  </span>
+					<span fg={colors.count}>enter</span>
+					<span fg={colors.muted}> open  </span>
+					<span fg={colors.count}>a</span>
+					<span fg={colors.muted}> comment  </span>
+					<span fg={colors.count}>c</span>
+					<span fg={colors.muted}> done  </span>
+					<span fg={colors.count}>[]</span>
+					<span fg={colors.muted}> files  </span>
+					<span fg={colors.count}>esc</span>
+					<span fg={colors.muted}> back</span>
+				</TextLine>
+			)
+		}
 		return (
 			<TextLine>
 				<span fg={colors.count}>esc</span>
@@ -57,6 +81,8 @@ export const FooterHints = ({
 				<span fg={colors.muted}> view  </span>
 				<span fg={colors.count}>w</span>
 				<span fg={colors.muted}> wrap  </span>
+				<span fg={colors.count}>c</span>
+				<span fg={colors.muted}> comment  </span>
 				<span fg={colors.count}>[]</span>
 				<span fg={colors.muted}> files  </span>
 				<span fg={colors.count}>r</span>
@@ -74,6 +100,30 @@ export const FooterHints = ({
 			<TextLine>
 				<span fg={colors.count}>esc</span>
 				<span fg={colors.muted}> back  </span>
+				<span fg={colors.count}>↑↓</span>
+				<span fg={colors.muted}> scroll  </span>
+				<span fg={colors.count}>r</span>
+				<span fg={colors.muted}>{hasError ? " retry  " : " refresh  "}</span>
+				<span fg={colors.count}>t</span>
+				<span fg={colors.muted}> theme  </span>
+				{hasSelection ? (
+					<>
+						<span fg={colors.count}>s</span>
+						<span fg={colors.muted}> state  </span>
+						<span fg={colors.count}>d</span>
+						<span fg={colors.muted}> diff  </span>
+						<span fg={colors.count}>l</span>
+						<span fg={colors.muted}> labels  </span>
+						<span fg={colors.count}>m</span>
+						<span fg={colors.muted}> merge  </span>
+						{canCloseSelection ? (
+							<>
+								<span fg={colors.count}>x</span>
+								<span fg={colors.muted}> close  </span>
+							</>
+						) : null}
+					</>
+				) : null}
 				<span fg={colors.count}>o</span>
 				<span fg={colors.muted}> open  </span>
 				<span fg={colors.count}>y</span>
@@ -86,6 +136,8 @@ export const FooterHints = ({
 
 	return (
 		<TextLine>
+			<span fg={colors.count}>tab</span>
+			<span fg={colors.muted}> queue  </span>
 			<span fg={colors.count}>/</span>
 			<span fg={colors.muted}> filter  </span>
 			<span fg={colors.count}>t</span>

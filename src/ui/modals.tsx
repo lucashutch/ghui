@@ -1,12 +1,14 @@
 import { TextAttributes } from "@opentui/core"
-import type { PullRequestLabel, PullRequestMergeInfo } from "../domain.js"
+import { Data } from "effect"
+import { formatShortDate, formatTimestamp } from "../date.js"
+import type { PullRequestLabel, PullRequestMergeInfo, PullRequestReviewComment } from "../domain.js"
 import { availableMergeActions } from "../mergeActions.js"
+import { clampCursor, commentEditorLines, cursorLineIndexForLines } from "./commentEditor.js"
 import { colors, filterThemeDefinitions, themeDefinitions, type ThemeId } from "./colors.js"
 import { centerCell, Divider, fitCell, ModalFrame, PlainLine, TextLine } from "./primitives.js"
 import { labelColor, shortRepoName } from "./pullRequests.js"
 
 export interface LabelModalState {
-	readonly open: boolean
 	readonly repository: string | null
 	readonly query: string
 	readonly selectedIndex: number
@@ -15,7 +17,6 @@ export interface LabelModalState {
 }
 
 export interface MergeModalState {
-	readonly open: boolean
 	readonly repository: string | null
 	readonly number: number | null
 	readonly selectedIndex: number
@@ -26,7 +27,6 @@ export interface MergeModalState {
 }
 
 export interface CloseModalState {
-	readonly open: boolean
 	readonly repository: string | null
 	readonly number: number | null
 	readonly title: string
@@ -35,15 +35,23 @@ export interface CloseModalState {
 	readonly error: string | null
 }
 
+export interface CommentModalState {
+	readonly body: string
+	readonly cursor: number
+	readonly error: string | null
+}
+
+export interface CommentThreadModalState {
+	readonly scrollOffset: number
+}
+
 export interface ThemeModalState {
-	readonly open: boolean
 	readonly query: string
 	readonly filterMode: boolean
 	readonly initialThemeId: ThemeId
 }
 
 export const initialLabelModalState: LabelModalState = {
-	open: false,
 	repository: null,
 	query: "",
 	selectedIndex: 0,
@@ -52,7 +60,6 @@ export const initialLabelModalState: LabelModalState = {
 }
 
 export const initialMergeModalState: MergeModalState = {
-	open: false,
 	repository: null,
 	number: null,
 	selectedIndex: 0,
@@ -63,7 +70,6 @@ export const initialMergeModalState: MergeModalState = {
 }
 
 export const initialCloseModalState: CloseModalState = {
-	open: false,
 	repository: null,
 	number: null,
 	title: "",
@@ -72,12 +78,46 @@ export const initialCloseModalState: CloseModalState = {
 	error: null,
 }
 
+export const initialCommentModalState: CommentModalState = {
+	body: "",
+	cursor: 0,
+	error: null,
+}
+
+export const initialCommentThreadModalState: CommentThreadModalState = {
+	scrollOffset: 0,
+}
+
 export const initialThemeModalState: ThemeModalState = {
-	open: false,
 	query: "",
 	filterMode: false,
 	initialThemeId: "ghui",
 }
+
+export type Modal = Data.TaggedEnum<{
+	None: {}
+	Label: { readonly state: LabelModalState }
+	Close: { readonly state: CloseModalState }
+	Merge: { readonly state: MergeModalState }
+	Comment: { readonly state: CommentModalState }
+	CommentThread: { readonly state: CommentThreadModalState }
+	Theme: { readonly state: ThemeModalState }
+}>
+
+export const Modal = Data.taggedEnum<Modal>()
+export const initialModal: Modal = Modal.None()
+
+export type ModalTag = Modal["_tag"]
+export type ModalState<Tag extends Exclude<ModalTag, "None">> = Extract<Modal, { _tag: Tag }>["state"]
+
+export const modalInitialStates = {
+	Label: initialLabelModalState,
+	Close: initialCloseModalState,
+	Merge: initialMergeModalState,
+	Comment: initialCommentModalState,
+	CommentThread: initialCommentThreadModalState,
+	Theme: initialThemeModalState,
+} as const satisfies { [Tag in Exclude<ModalTag, "None">]: ModalState<Tag> }
 
 const mergeUnavailableReason = (info: PullRequestMergeInfo | null) => {
 	if (!info) return "Loading merge status from GitHub."
@@ -343,6 +383,193 @@ export const CloseModal = ({
 					<span fg={colors.muted}> close  </span>
 					<span fg={colors.count}>esc</span>
 					<span fg={colors.muted}> cancel</span>
+				</TextLine>
+			</box>
+		</ModalFrame>
+	)
+}
+
+export const CommentModal = ({
+	state,
+	anchorLabel,
+	modalWidth,
+	modalHeight,
+	offsetLeft,
+	offsetTop,
+}: {
+	state: CommentModalState
+	anchorLabel: string
+	modalWidth: number
+	modalHeight: number
+	offsetLeft: number
+	offsetTop: number
+}) => {
+	const innerWidth = Math.max(16, modalWidth - 2)
+	const contentWidth = Math.max(14, innerWidth - 2)
+	const title = "Comment"
+	const rightText = "enter save"
+	const headerGap = Math.max(1, contentWidth - title.length - rightText.length)
+	const bodyHeight = Math.max(1, modalHeight - 7)
+	const editorHeight = Math.max(1, bodyHeight - (state.error ? 1 : 0))
+	const lineRanges = commentEditorLines(state.body)
+	const cursor = clampCursor(state.body, state.cursor)
+	const cursorLineIndex = cursorLineIndexForLines(lineRanges, cursor)
+	const visibleStart = Math.min(
+		Math.max(0, lineRanges.length - editorHeight),
+		Math.max(0, cursorLineIndex - editorHeight + 1),
+	)
+	const visibleLines = lineRanges.slice(visibleStart, visibleStart + editorHeight)
+	const renderEditorLine = (line: { readonly text: string; readonly start: number; readonly end: number }, index: number) => {
+		const lineIndex = visibleStart + index
+		const isCursorLine = lineIndex === cursorLineIndex
+		const cursorColumn = Math.max(0, Math.min(cursor - line.start, line.text.length))
+		const viewStart = isCursorLine ? Math.max(0, cursorColumn - contentWidth + 1) : 0
+		const visibleText = line.text.slice(viewStart, viewStart + contentWidth)
+
+		if (!isCursorLine) {
+			return <PlainLine key={lineIndex} text={fitCell(visibleText, contentWidth)} fg={state.body.length > 0 ? colors.text : colors.muted} />
+		}
+
+		const cursorInView = cursorColumn - viewStart
+		const before = visibleText.slice(0, cursorInView)
+		const placeholder = state.body.length === 0 ? "Write a comment..." : ""
+		const cursorChar = placeholder ? placeholder[0] ?? " " : visibleText[cursorInView] ?? " "
+		const after = placeholder ? placeholder.slice(1) : visibleText.slice(cursorInView + 1)
+
+		return (
+			<TextLine key={lineIndex}>
+				{before ? <span fg={colors.text}>{before}</span> : null}
+				<span bg={colors.accent} fg={colors.background}>{cursorChar}</span>
+				{after ? <span fg={placeholder ? colors.muted : colors.text}>{after}</span> : null}
+			</TextLine>
+		)
+	}
+
+	return (
+		<ModalFrame left={offsetLeft} top={offsetTop} width={modalWidth} height={modalHeight} junctionRows={[2, modalHeight - 4]}>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.accent} attributes={TextAttributes.BOLD}>{title}</span>
+					<span fg={colors.muted}>{" ".repeat(headerGap)}</span>
+					<span fg={colors.muted}>{rightText}</span>
+				</TextLine>
+			</box>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<PlainLine text={fitCell(anchorLabel, contentWidth)} fg={colors.muted} />
+			</box>
+			<Divider width={innerWidth} />
+			<box height={bodyHeight} flexDirection="column" paddingLeft={1} paddingRight={1}>
+				{state.error ? <PlainLine text={fitCell(state.error, contentWidth)} fg={colors.error} /> : null}
+				{visibleLines.map(renderEditorLine)}
+			</box>
+			<Divider width={innerWidth} />
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.count}>enter</span>
+					<span fg={colors.muted}> save  </span>
+					<span fg={colors.count}>shift-enter</span>
+					<span fg={colors.muted}> newline  </span>
+					<span fg={colors.count}>esc</span>
+					<span fg={colors.muted}> cancel</span>
+				</TextLine>
+			</box>
+		</ModalFrame>
+	)
+}
+
+type CommentThreadRow = {
+	readonly key: string
+	readonly text: string
+	readonly fg: string
+	readonly bold?: boolean
+}
+
+const wrapCommentBody = (body: string, width: number) => {
+	const lines = body.length === 0 ? [""] : body.split("\n")
+	return lines.flatMap((line) => {
+		if (line.length === 0) return [""]
+		const wrapped: string[] = []
+		for (let index = 0; index < line.length; index += width) {
+			wrapped.push(line.slice(index, index + width))
+		}
+		return wrapped
+	})
+}
+
+const formatCommentDate = (date: Date | null) => date ? `${formatShortDate(date)} ${formatTimestamp(date)}` : ""
+
+const commentThreadRows = (comments: readonly PullRequestReviewComment[], width: number): readonly CommentThreadRow[] =>
+	comments.flatMap((comment, commentIndex) => {
+		const timestamp = formatCommentDate(comment.createdAt)
+		const header = timestamp ? `${comment.author}  ${timestamp}` : comment.author
+		return [
+			{ key: `${comment.id}:header`, text: header, fg: colors.count, bold: true },
+			...wrapCommentBody(comment.body, width).map((line, lineIndex) => ({
+				key: `${comment.id}:body:${lineIndex}`,
+				text: line,
+				fg: colors.text,
+			})),
+			...(commentIndex < comments.length - 1 ? [{ key: `${comment.id}:gap`, text: "", fg: colors.muted }] : []),
+		]
+	})
+
+export const CommentThreadModal = ({
+	state,
+	anchorLabel,
+	comments,
+	modalWidth,
+	modalHeight,
+	offsetLeft,
+	offsetTop,
+}: {
+	state: CommentThreadModalState
+	anchorLabel: string
+	comments: readonly PullRequestReviewComment[]
+	modalWidth: number
+	modalHeight: number
+	offsetLeft: number
+	offsetTop: number
+}) => {
+	const innerWidth = Math.max(16, modalWidth - 2)
+	const contentWidth = Math.max(14, innerWidth - 2)
+	const title = "Thread"
+	const countText = comments.length === 1 ? "1 comment" : `${comments.length} comments`
+	const headerGap = Math.max(1, contentWidth - title.length - countText.length)
+	const bodyHeight = Math.max(1, modalHeight - 7)
+	const rows = commentThreadRows(comments, contentWidth)
+	const maxScroll = Math.max(0, rows.length - bodyHeight)
+	const scrollOffset = Math.max(0, Math.min(state.scrollOffset, maxScroll))
+	const visibleRows = rows.slice(scrollOffset, scrollOffset + bodyHeight)
+
+	return (
+		<ModalFrame left={offsetLeft} top={offsetTop} width={modalWidth} height={modalHeight} junctionRows={[2, modalHeight - 4]}>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.accent} attributes={TextAttributes.BOLD}>{title}</span>
+					<span fg={colors.muted}>{" ".repeat(headerGap)}</span>
+					<span fg={colors.muted}>{countText}</span>
+				</TextLine>
+			</box>
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<PlainLine text={fitCell(anchorLabel, contentWidth)} fg={colors.muted} />
+			</box>
+			<Divider width={innerWidth} />
+			<box height={bodyHeight} flexDirection="column" paddingLeft={1} paddingRight={1}>
+				{visibleRows.length === 0 ? (
+					<PlainLine text={fitCell("No comments on this line.", contentWidth)} fg={colors.muted} />
+				) : visibleRows.map((row) => (
+					<PlainLine key={row.key} text={fitCell(row.text, contentWidth)} fg={row.fg} bold={row.bold ?? false} />
+				))}
+			</box>
+			<Divider width={innerWidth} />
+			<box height={1} paddingLeft={1} paddingRight={1}>
+				<TextLine>
+					<span fg={colors.count}>↑↓</span>
+					<span fg={colors.muted}> scroll  </span>
+					<span fg={colors.count}>a</span>
+					<span fg={colors.muted}> comment  </span>
+					<span fg={colors.count}>esc</span>
+					<span fg={colors.muted}> close</span>
 				</TextLine>
 			</box>
 		</ModalFrame>

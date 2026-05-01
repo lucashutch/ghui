@@ -25,10 +25,26 @@ const groupNumberWidth = (pullRequests: readonly PullRequestItem[]) => {
 	return maxLen + 1
 }
 
-const GroupTitle = ({ label, color }: { label: string; color: string }) => (
+const MatchedCell = ({ text, width, query, align = "left" }: { text: string; width: number; query: string; align?: "left" | "right" }) => {
+	const fitted = fitCell(text, width, align)
+	const needle = query.trim().toLowerCase()
+	const index = needle.length > 0 ? fitted.toLowerCase().indexOf(needle) : -1
+	if (index < 0) return <span>{fitted}</span>
+
+	const end = Math.min(fitted.length, index + needle.length)
+	return (
+		<>
+			{index > 0 ? <span>{fitted.slice(0, index)}</span> : null}
+			<span fg={colors.accent} attributes={TextAttributes.BOLD}>{fitted.slice(index, end)}</span>
+			{end < fitted.length ? <span>{fitted.slice(end)}</span> : null}
+		</>
+	)
+}
+
+const GroupTitle = ({ label, color, filterText }: { label: string; color: string; filterText: string }) => (
 	<TextLine>
 		<span fg={color}>{GROUP_ICON} </span>
-		<span fg={color} attributes={TextAttributes.BOLD}>{label}</span>
+		<span fg={color} attributes={TextAttributes.BOLD}><MatchedCell text={label} width={label.length} query={filterText} /></span>
 	</TextLine>
 )
 
@@ -37,12 +53,14 @@ const PullRequestRow = ({
 	selected,
 	contentWidth,
 	numWidth,
+	filterText,
 	onSelect,
 }: {
 	pullRequest: PullRequestItem
 	selected: boolean
 	contentWidth: number
 	numWidth: number
+	filterText: string
 	onSelect: () => void
 }) => {
 	const isClosed = pullRequest.state === "closed"
@@ -63,9 +81,9 @@ const PullRequestRow = ({
 			<TextLine fg={rowTextColor} bg={selected ? colors.selectedBg : undefined}>
 				<span fg={indicatorColor}>{fitCell(reviewIcon(pullRequest), reviewWidth)}</span>
 				<span> </span>
-				<span fg={numberColor}>{fitCell(`#${pullRequest.number}`, numberWidth, "right")}</span>
+				<span fg={numberColor}><MatchedCell text={`#${pullRequest.number}`} width={numberWidth} query={filterText} align="right" /></span>
 				<span> </span>
-				<span>{fitCell(pullRequest.title, titleWidth)}</span>
+				<span><MatchedCell text={pullRequest.title} width={titleWidth} query={filterText} /></span>
 				<span fg={checkColor}>{fitCell(checkText, checkWidth, "right")}</span>
 				<span fg={colors.muted}>{fitCell(ageText, ageWidth, "right")}</span>
 				{fillerWidth > 0 ? <span>{" ".repeat(fillerWidth)}</span> : null}
@@ -115,15 +133,16 @@ export const PullRequestList = ({
 				const numWidth = groupNumberWidth(pullRequests)
 				return (
 					<box key={repo} flexDirection="column">
-						<GroupTitle label={repo} color={repoColor(repo)} />
+						<GroupTitle label={repo} color={repoColor(repo)} filterText={filterText} />
 						{pullRequests.map((pullRequest) => (
 							<PullRequestRow
 								key={pullRequest.url}
 								pullRequest={pullRequest}
-								selected={pullRequest.url === selectedUrl}
-								contentWidth={contentWidth}
-								numWidth={numWidth}
-								onSelect={() => onSelectPullRequest(pullRequest.url)}
+							selected={pullRequest.url === selectedUrl}
+							contentWidth={contentWidth}
+							numWidth={numWidth}
+							filterText={filterText}
+							onSelect={() => onSelectPullRequest(pullRequest.url)}
 							/>
 						))}
 					</box>

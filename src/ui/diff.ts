@@ -1,11 +1,38 @@
 import { parseColor, SyntaxStyle } from "@opentui/core"
-import type { PullRequestItem } from "../domain.js"
+import type { DiffCommentSide, PullRequestItem, PullRequestReviewComment } from "../domain.js"
 import { colors } from "./colors.js"
 
 export interface DiffFilePatch {
 	readonly name: string
 	readonly filetype: string | undefined
 	readonly patch: string
+}
+
+export interface DiffFileStats {
+	readonly additions: number
+	readonly deletions: number
+}
+
+export interface StackedDiffFilePatch {
+	readonly file: DiffFilePatch
+	readonly index: number
+	readonly headerLine: number
+	readonly diffStartLine: number
+	readonly diffHeight: number
+}
+
+export interface DiffCommentAnchor {
+	readonly path: string
+	readonly line: number
+	readonly side: DiffCommentSide
+	readonly kind: "addition" | "deletion" | "context"
+	readonly renderLine: number
+	readonly text: string
+}
+
+export type StackedDiffCommentAnchor = DiffCommentAnchor & {
+	readonly fileIndex: number
+	readonly localRenderLine: number
 }
 
 export type PullRequestDiffState =
@@ -144,6 +171,32 @@ export const splitPatchFiles = (patch: string): readonly DiffFilePatch[] => {
 
 export const pullRequestDiffKey = (pullRequest: PullRequestItem) => `${pullRequest.repository}#${pullRequest.number}`
 
+export const safeDiffFileIndex = (files: readonly DiffFilePatch[], index: number) =>
+	files.length > 0 ? Math.max(0, Math.min(index, files.length - 1)) : 0
+
+export const buildStackedDiffFiles = (
+	files: readonly DiffFilePatch[],
+	view: "unified" | "split",
+	wrapMode: "none" | "word",
+	width: number,
+): readonly StackedDiffFilePatch[] => {
+	let offset = 0
+	return files.map((file, index) => {
+		const diffHeight = patchRenderableLineCount(file.patch, view, wrapMode, width)
+		const separatorBefore = index === 0 ? 0 : 1
+		const headerLine = offset + separatorBefore
+		const stackedFile = {
+			file,
+			index,
+			headerLine,
+			diffStartLine: headerLine + 2,
+			diffHeight,
+		} satisfies StackedDiffFilePatch
+		offset += separatorBefore + 2 + diffHeight
+		return stackedFile
+	})
+}
+
 export const diffStatText = (pullRequest: PullRequestItem) => {
 	if (!pullRequest.detailLoaded) return "loading details"
 	const files = pullRequest.changedFiles === 1 ? "1 file" : `${pullRequest.changedFiles} files`
@@ -152,6 +205,153 @@ export const diffStatText = (pullRequest: PullRequestItem) => {
 		pullRequest.deletions > 0 ? `-${pullRequest.deletions}` : null,
 		files,
 	].filter((part): part is string => part !== null).join(" ")
+}
+
+export const diffCommentLocationKey = (location: Pick<PullRequestReviewComment, "path" | "side" | "line">) => `${location.path}:${location.side}:${location.line}`
+
+export const diffCommentAnchorKey = diffCommentLocationKey
+
+type PendingDiffCommentAnchor = Omit<DiffCommentAnchor, "renderLine">
+
+const diffContentWidth = (lines: readonly string[], view: "unified" | "split", width: number) => {
+	const lineNumberGutterWidth = patchLineNumberGutterWidth(lines)
+	return view === "split"
+		? Math.max(1, Math.floor(width / 2) - lineNumberGutterWidth)
+		: Math.max(1, width - lineNumberGutterWidth)
+}
+
+export const diffFileStats = (file: DiffFilePatch): DiffFileStats => {
+	let additions = 0
+	let deletions = 0
+	let inHunk = false
+
+	for (const line of file.patch.split("\n")) {
+		const hunk = line.match(hunkHeaderPattern)
+		if (hunk) {
+			inHunk = true
+			continue
+		}
+
+		if (!inHunk) continue
+		const firstChar = line[0]
+		if (firstChar === "+") additions++
+		else if (firstChar === "-") deletions++
+	}
+
+	return { additions, deletions }
+}
+
+export const diffFileStatText = (file: DiffFilePatch) => {
+	const stats = diffFileStats(file)
+	return [
+		stats.additions > 0 ? `+${stats.additions}` : null,
+		stats.deletions > 0 ? `-${stats.deletions}` : null,
+	].filter((part): part is string => part !== null).join(" ")
+}
+
+export const getDiffCommentAnchors = (file: DiffFilePatch, view: "unified" | "split" = "unified", wrapMode: "none" | "word" = "none", width = 120): readonly DiffCommentAnchor[] => {
+	const anchors: DiffCommentAnchor[] = []
+	const lines = file.patch.split("\n")
+	const contentWidth = diffContentWidth(lines, view, width)
+	let oldLine = 0
+	let newLine = 0
+	let renderLine = 0
+	let inHunk = false
+	let deletions: Array<PendingDiffCommentAnchor & { readonly height: number }> = []
+	let additions: Array<PendingDiffCommentAnchor & { readonly height: number }> = []
+
+	const flushChangeBlock = () => {
+		if (deletions.length === 0 && additions.length === 0) return
+		if (view === "split") {
+			const rowCount = Math.max(deletions.length, additions.length)
+			for (let index = 0; index < rowCount; index++) {
+				const deletion = deletions[index]
+				const addition = additions[index]
+				if (deletion) anchors.push({ path: deletion.path, line: deletion.line, side: deletion.side, kind: deletion.kind, text: deletion.text, renderLine })
+				if (addition) anchors.push({ path: addition.path, line: addition.line, side: addition.side, kind: addition.kind, text: addition.text, renderLine })
+				renderLine += Math.max(deletion?.height ?? 1, addition?.height ?? 1)
+			}
+		} else {
+			for (const deletion of deletions) {
+				anchors.push({ path: deletion.path, line: deletion.line, side: deletion.side, kind: deletion.kind, text: deletion.text, renderLine })
+				renderLine += deletion.height
+			}
+			for (const addition of additions) {
+				anchors.push({ path: addition.path, line: addition.line, side: addition.side, kind: addition.kind, text: addition.text, renderLine })
+				renderLine += addition.height
+			}
+		}
+		deletions = []
+		additions = []
+	}
+
+	for (const line of lines) {
+		const hunk = line.match(hunkHeaderPattern)
+		if (hunk) {
+			flushChangeBlock()
+			oldLine = Number(hunk[1])
+			newLine = Number(hunk[3])
+			inHunk = true
+			continue
+		}
+
+		if (!inHunk) continue
+
+		const firstChar = line[0]
+		if (firstChar === "\\") continue
+
+		if (firstChar === "+") {
+			const text = line.slice(1)
+			additions.push({ path: file.name, line: newLine, side: "RIGHT", kind: "addition", text, height: estimatedWrappedLineCount(text, contentWidth, wrapMode) })
+			newLine++
+			continue
+		}
+
+		if (firstChar === "-") {
+			const text = line.slice(1)
+			deletions.push({ path: file.name, line: oldLine, side: "LEFT", kind: "deletion", text, height: estimatedWrappedLineCount(text, contentWidth, wrapMode) })
+			oldLine++
+			continue
+		}
+
+		if (firstChar === " ") {
+			flushChangeBlock()
+			const text = line.slice(1)
+			anchors.push({ path: file.name, line: newLine, side: "RIGHT", kind: "context", renderLine, text })
+			oldLine++
+			newLine++
+			renderLine += estimatedWrappedLineCount(text, contentWidth, wrapMode)
+		}
+	}
+
+	flushChangeBlock()
+	return anchors
+}
+
+export const getStackedDiffCommentAnchors = (
+	stackedFiles: readonly StackedDiffFilePatch[],
+	view: "unified" | "split" = "unified",
+	wrapMode: "none" | "word" = "none",
+	width = 120,
+): readonly StackedDiffCommentAnchor[] =>
+	stackedFiles.flatMap((stackedFile) => getDiffCommentAnchors(stackedFile.file, view, wrapMode, width).map((anchor) => ({
+		...anchor,
+		fileIndex: stackedFile.index,
+		localRenderLine: anchor.renderLine,
+		renderLine: stackedFile.diffStartLine + anchor.renderLine,
+	})))
+
+export const nearestDiffCommentAnchorIndex = (anchors: readonly DiffCommentAnchor[], renderLine: number) => {
+	if (anchors.length === 0) return 0
+	const nextIndex = anchors.findIndex((anchor) => anchor.renderLine >= renderLine)
+	return nextIndex >= 0 ? nextIndex : anchors.length - 1
+}
+
+export const scrollTopForVisibleLine = (currentTop: number, viewportHeight: number, line: number, margin = 1) => {
+	const safeViewportHeight = Math.max(1, viewportHeight)
+	if (line < currentTop + margin) return Math.max(0, line - margin)
+	if (line >= currentTop + safeViewportHeight - margin) return Math.max(0, line - safeViewportHeight + margin + 1)
+	return currentTop
 }
 
 const estimatedWrappedLineCount = (text: string, width: number, wrapMode: "none" | "word") => {
@@ -166,10 +366,10 @@ const patchLineNumberGutterWidth = (lines: readonly string[]) => {
 	let newLine = 0
 
 	for (const line of lines) {
-		const hunk = line.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/)
+		const hunk = line.match(hunkHeaderPattern)
 		if (hunk) {
 			oldLine = Number(hunk[1])
-			newLine = Number(hunk[2])
+			newLine = Number(hunk[3])
 			maxLineNumber = Math.max(maxLineNumber, oldLine, newLine)
 			continue
 		}
@@ -196,10 +396,7 @@ const patchLineNumberGutterWidth = (lines: readonly string[]) => {
 
 export const patchRenderableLineCount = (patch: string, view: "unified" | "split", wrapMode: "none" | "word", width: number) => {
 	const lines = patch.split("\n")
-	const lineNumberGutterWidth = patchLineNumberGutterWidth(lines)
-	const splitPaneWidth = Math.max(1, Math.floor(width / 2) - lineNumberGutterWidth)
-	const unifiedPaneWidth = Math.max(1, width - lineNumberGutterWidth)
-	const contentWidth = view === "split" ? splitPaneWidth : unifiedPaneWidth
+	const contentWidth = diffContentWidth(lines, view, width)
 	let count = 0
 	let inHunk = false
 	let deletions: number[] = []
