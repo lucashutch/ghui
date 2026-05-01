@@ -198,7 +198,7 @@ const copyPullRequestMetadata = async (pullRequest: PullRequestItem) => {
 
 const isShiftG = (key: { readonly name: string; readonly shift?: boolean }) => key.name === "G" || key.name === "g" && key.shift
 
-const isShiftT = (key: { readonly name: string; readonly shift?: boolean }) => key.name === "T" || key.name === "t" && key.shift
+const isThemeKey = (key: { readonly name: string; readonly ctrl?: boolean; readonly meta?: boolean }) => !key.ctrl && !key.meta && key.name.toLowerCase() === "t"
 
 const getDetailPlaceholderContent = ({
 	status,
@@ -278,8 +278,10 @@ export const App = () => {
 	const getPullRequestDiff = useAtomSet(getPullRequestDiffAtom, { mode: "promise" })
 	const getPullRequestMergeInfo = useAtomSet(getPullRequestMergeInfoAtom, { mode: "promise" })
 	const mergePullRequest = useAtomSet(mergePullRequestAtom, { mode: "promise" })
-	const contentWidth = Math.max(60, width ?? 100)
-	const isWideLayout = (width ?? 100) >= 100
+	const terminalWidth = width ?? 100
+	const terminalHeight = height ?? 24
+	const contentWidth = Math.max(1, terminalWidth)
+	const isWideLayout = terminalWidth >= 100
 	const splitGap = 1
 	const sectionPadding = 1
 	const leftPaneWidth = isWideLayout ? Math.max(44, Math.floor((contentWidth - splitGap) * 0.56)) : contentWidth
@@ -287,8 +289,8 @@ export const App = () => {
 	const dividerJunctionAt = Math.max(1, leftPaneWidth)
 	const leftContentWidth = isWideLayout ? Math.max(24, leftPaneWidth - 3) : Math.max(24, contentWidth - sectionPadding * 2)
 	const rightContentWidth = isWideLayout ? Math.max(24, rightPaneWidth - sectionPadding * 2) : Math.max(24, contentWidth - sectionPadding * 2)
-	const wideDetailLines = Math.max(8, (height ?? 24) - 8) // fill available vertical space
-	const wideBodyHeight = Math.max(8, (height ?? 24) - 4)
+	const wideDetailLines = Math.max(8, terminalHeight - 8) // fill available vertical space
+	const wideBodyHeight = Math.max(8, terminalHeight - 4)
 	const noticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 	const pendingGTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 	const diffPrefetchTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -557,13 +559,12 @@ export const App = () => {
 		setMergeModal(initialMergeModalState)
 		setThemeModal({
 			open: true,
-			selectedIndex: Math.max(0, themeDefinitions.findIndex((theme) => theme.id === themeId)),
 			initialThemeId: themeId,
 		})
 	}
 
 	const closeThemeModal = (confirm: boolean) => {
-		const selectedTheme = themeDefinitions[themeModal.selectedIndex]
+		const selectedTheme = themeDefinitions.find((theme) => theme.id === themeId)
 		if (!confirm) {
 			setThemeId(themeModal.initialThemeId)
 		} else if (selectedTheme) {
@@ -573,11 +574,11 @@ export const App = () => {
 	}
 
 	const moveThemeSelection = (delta: number) => {
-		const selectedIndex = Math.max(0, Math.min(themeDefinitions.length - 1, themeModal.selectedIndex + delta))
-		if (selectedIndex === themeModal.selectedIndex) return
+		const currentIndex = Math.max(0, themeDefinitions.findIndex((theme) => theme.id === themeId))
+		const selectedIndex = Math.max(0, Math.min(themeDefinitions.length - 1, currentIndex + delta))
+		if (selectedIndex === currentIndex) return
 		const theme = themeDefinitions[selectedIndex]
 		if (theme && theme.id !== themeId) setThemeId(theme.id)
-		setThemeModal((current) => ({ ...current, selectedIndex }))
 	}
 
 	const openLabelModal = () => {
@@ -1032,7 +1033,7 @@ export const App = () => {
 			}
 		}
 
-		if (isShiftT(key)) {
+		if (isThemeKey(key)) {
 			openThemeModal()
 			return
 		}
@@ -1183,7 +1184,7 @@ export const App = () => {
 	})
 
 	const fullscreenContentWidth = Math.max(24, contentWidth - 2)
-	const fullscreenBodyLines = Math.max(8, (height ?? 24) - 8)
+	const fullscreenBodyLines = Math.max(8, terminalHeight - 8)
 	const wideFullscreenDetailScrollable = getDetailsPaneHeight({
 		pullRequest: selectedPullRequest,
 		contentWidth: fullscreenContentWidth,
@@ -1214,20 +1215,20 @@ export const App = () => {
 
 	const longestLabelName = labelModal.availableLabels.reduce((max, label) => Math.max(max, label.name.length), 0)
 	const labelModalWidth = Math.min(Math.max(42, longestLabelName + 16), 56, contentWidth - 4)
-	const labelModalHeight = Math.min(20, (height ?? 24) - 4)
+	const labelModalHeight = Math.min(20, terminalHeight - 4)
 	const labelModalLeft = Math.floor((contentWidth - labelModalWidth) / 2)
-	const labelModalTop = Math.floor(((height ?? 24) - labelModalHeight) / 2)
+	const labelModalTop = Math.floor((terminalHeight - labelModalHeight) / 2)
 	const mergeModalWidth = Math.min(68, Math.max(46, contentWidth - 12))
-	const mergeModalHeight = Math.min(16, (height ?? 24) - 4)
+	const mergeModalHeight = Math.min(16, terminalHeight - 4)
 	const mergeModalLeft = Math.floor((contentWidth - mergeModalWidth) / 2)
-	const mergeModalTop = Math.floor(((height ?? 24) - mergeModalHeight) / 2)
+	const mergeModalTop = Math.floor((terminalHeight - mergeModalHeight) / 2)
 	const themeModalWidth = Math.min(58, Math.max(38, contentWidth - 12))
-	const themeModalHeight = Math.min(10, (height ?? 24) - 4)
+	const themeModalHeight = Math.min(16, terminalHeight - 4)
 	const themeModalLeft = Math.floor((contentWidth - themeModalWidth) / 2)
-	const themeModalTop = Math.floor(((height ?? 24) - themeModalHeight) / 2)
+	const themeModalTop = Math.floor((terminalHeight - themeModalHeight) / 2)
 
 	return (
-		<box flexGrow={1} flexDirection="column" backgroundColor={colors.background}>
+		<box width={terminalWidth} height={terminalHeight} flexDirection="column" backgroundColor={colors.background}>
 			<box paddingLeft={1} paddingRight={1} flexDirection="column" backgroundColor={colors.panel}>
 				<PlainLine text={headerLine} fg={colors.muted} bold />
 			</box>
@@ -1300,7 +1301,7 @@ export const App = () => {
 					</scrollbox>
 				</box>
 			) : (
-				<>
+				<box height={wideBodyHeight} flexDirection="column">
 					<DetailsPane pullRequest={selectedPullRequest} contentWidth={rightContentWidth} paneWidth={contentWidth} placeholderContent={detailPlaceholderContent} loadingIndicator={loadingIndicator} />
 					<Divider width={contentWidth} />
 					<box flexGrow={1} flexDirection="column">
@@ -1310,7 +1311,7 @@ export const App = () => {
 							</box>
 						</scrollbox>
 					</box>
-				</>
+				</box>
 			)}
 
 			{isWideLayout && !detailFullView && !diffFullView && !isInitialLoading ? (
@@ -1318,7 +1319,7 @@ export const App = () => {
 			) : (
 				<Divider width={contentWidth} />
 			)}
-			<box paddingLeft={1} paddingRight={1} backgroundColor={colors.panel}>
+			<box paddingLeft={1} paddingRight={1} backgroundColor={colors.footer}>
 				{footerNotice ? (
 					<PlainLine text={footerNotice} fg={colors.count} />
 				) : (

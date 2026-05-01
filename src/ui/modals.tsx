@@ -27,7 +27,6 @@ export interface MergeModalState {
 
 export interface ThemeModalState {
 	readonly open: boolean
-	readonly selectedIndex: number
 	readonly initialThemeId: ThemeId
 }
 
@@ -53,7 +52,6 @@ export const initialMergeModalState: MergeModalState = {
 
 export const initialThemeModalState: ThemeModalState = {
 	open: false,
-	selectedIndex: 0,
 	initialThemeId: "ghui",
 }
 
@@ -279,7 +277,8 @@ export const ThemeModal = ({
 	const contentWidth = Math.max(14, innerWidth - 2)
 	const rowWidth = innerWidth
 	const maxVisible = Math.max(1, modalHeight - 7)
-	const selectedIndex = Math.max(0, Math.min(state.selectedIndex, themeDefinitions.length - 1))
+	const activeIndex = themeDefinitions.findIndex((theme) => theme.id === activeThemeId)
+	const selectedIndex = Math.max(0, activeIndex)
 	const selectedTheme = themeDefinitions[selectedIndex]!
 	const scrollStart = Math.min(
 		Math.max(0, themeDefinitions.length - maxVisible),
